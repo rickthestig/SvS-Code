@@ -1,0 +1,14 @@
+private/
+ssh_config
+*.local.json
+*.token
+*.jsonl
+*.db*
+*.pem
+*.key
+*.qcow2
+.env*
+.venv/
+__pycache__/
+red.json
+blue.json

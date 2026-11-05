@@ -1,0 +1,36 @@
+# Replace addresses after verifying current DHCP leases. Supply dedicated keys.
+# Run from the thesis-lab directory. Use absolute paths for all key files.
+Host thesis-*
+    IdentitiesOnly yes
+    PasswordAuthentication no
+    StrictHostKeyChecking yes
+    UserKnownHostsFile ~/.ssh/thesis_known_hosts
+    ForwardAgent no
+    ClearAllForwardings yes
+Host thesis-jump
+    HostName jump.example.invalid
+    User gns3
+    IdentityFile ~/.ssh/thesis_jump
+Host thesis-kali thesis-weak thesis-stock thesis-iot thesis-pfsense
+    ProxyJump thesis-jump
+Host thesis-kali
+    HostName 192.168.247.129
+    User kali
+    IdentityFile ~/.ssh/thesis_red
+Host thesis-pfsense
+    HostName 10.10.20.1
+    User admin
+    IdentityFile ~/.ssh/thesis_blue
+Host thesis-weak
+    HostName 10.10.30.20
+    User defender
+    IdentityFile ~/.ssh/thesis_blue
+Host thesis-stock
+    HostName 10.10.20.15
+    User defender
+    IdentityFile ~/.ssh/thesis_blue
+Host thesis-iot
+    HostName 10.10.40.20
+    User defender
+    IdentityFile ~/.ssh/thesis_blue
+

@@ -1,0 +1,14 @@
+{
+  "project_id": "REPLACE_WITH_PROJECT_UUID",
+  "targets": {
+    "weak": {"node_id":"REPLACE_WITH_WEAK_NODE_UUID","ip":"10.10.30.20"},
+    "iot": {"node_id":"REPLACE_WITH_IOT_NODE_UUID","ip":"10.10.40.20"}
+  },
+  "jump_host":"jump.example.invalid",
+  "jump_user":"gns3",
+  "jump_key":"~/.ssh/thesis_jump",
+  "gns3_ini":"%APPDATA%/GNS3/2.2/gns3_server.ini",
+  "api_url":"http://localhost:3080/v2",
+  "project_root":"/opt/gns3/projects",
+  "baseline_root":"/absolute/path/to/verified/baselines"
+}
