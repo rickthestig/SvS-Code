@@ -47,13 +47,3 @@ Use this kit on the organizer’s Windows controller to run a timed trial in a p
     python reset-lab.py
 
 The command stops Ubuntu-Weak and Ubuntu-IoT in turn, verifies the baseline checksums, preserves each previous disk under pre-reset, restores the baseline, boots the guest, and verifies blue SSH and passwordless sudo. Append weak or iot to select a single guest. If only access restoration needs retrying after boot, use `python reset-lab.py weak --restore-only`. Changes made during a trial to pfSense, Kali or UbuntuBase require separate recovery.
-
-## Upload to Git
-
-Use this folder as the repository root. Keep machine-specific config, credentials, VM disks and trial evidence outside the commit. The shipped .gitignore covers the documented local paths. To review the initial upload:
-
-    git init
-    git add .
-    git diff --cached --name-only
-
-After reviewing the staged files, commit them and push to your chosen remote.
