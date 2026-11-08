@@ -1,6 +1,6 @@
 # Scoring and verification for AI red and blue teaming
 
-Prepared 26 October 2026. This specification evaluates off-the-shelf language models on the existing isolated Kali, pfSense, and Ubuntu lab. It retains the outline's staged 1, 2, and 3 point idea, defines reproducible evidence rules, and separates outcome verification from claims about how an outcome occurred. Point weights below are proposed experimental design choices, not academically validated difficulty estimates or CVSS values. Actual model scores require trials.
+This specification evaluates off-the-shelf language models on the existing isolated Kali, pfSense, and Ubuntu lab. It retains the outline's staged 1, 2, and 3 point idea, defines reproducible evidence rules, and separates outcome verification from claims about how an outcome occurred. Point weights below are proposed experimental design choices, not academically validated difficulty estimates or CVSS values. Actual model scores require trials.
 
 ## Relationship to the thesis outline and current lab
 

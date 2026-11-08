@@ -1,0 +1,14 @@
+# API keys / credentials
+attacker.txt
+defender.txt
+lab-admin-key
+
+# Pinned host keys + hostnames for the internal lab network -- not a credential, but reveals lab
+# topology/IPs that shouldn't ship with the repo either.
+target-known-hosts
+
+# Local run state (session IDs, PIDs -- not secret, just ephemeral/machine-specific)
+.engagement_state.json
+
+__pycache__/
+*.pyc

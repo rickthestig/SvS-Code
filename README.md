@@ -1,49 +1,54 @@
 # Red and blue team lab runner
 
-Use this kit on the organizer’s Windows controller to run a timed trial in a prepared GNS3 lab, collect evidence and scores, and reset the Ubuntu targets afterward. Run all commands from the repository root. The kit assumes you already have the isolated topology, challenge fixtures, working management routes, SSH accounts, and frozen baseline disks. Connecting an AI participant requires your own adapter for the local bridge API.
+Scores and archives a red-vs-blue round in the GNS3 lab. This file describes how the exercise
+**actually runs today**; see the note at the bottom about files in this repo that reflect an
+earlier, superseded design.
 
-## Set up once
+## Running an exercise
 
-1. Install Python 3.11 or later and the OpenSSH client. Create the environment and local config files in PowerShell:
+The actual orchestration tool is `engagement-tool/`, a self-contained CLI — everything it needs
+(GNS3/Kali SSH pivot, the admin key, vendored SSH libraries, scope docs) lives alongside it. Run
+from inside that folder, with GNS3 running and the GNS3 VM reachable:
 
-       python -m venv .venv
-       .\.venv\Scripts\Activate.ps1
-       python -m pip install -r requirements.txt
-       Copy-Item ssh_config.example ssh_config
-       Copy-Item reset.example.json reset.local.json
-       New-Item -ItemType Directory -Force private
+```powershell
+cd engagement-tool
+python engagement.py check            # verify GNS3 VM/Kali/targets/keys are all reachable first
+python engagement.py start            # full reset + kickoff: both agents launched together
+python engagement.py status --watch   # live status until both finish
+python engagement.py collect          # pull results, submit captured flags, auto-attest, archive
+python engagement.py stop             # stop both agents mid-run if something needs aborting
+```
 
-2. Restrict the private directory to the organizer using the controller’s filesystem permissions. Edit ssh_config with your actual hostnames, usernames and dedicated key paths. Verify host fingerprints from the VM consoles and record the jump host and targets in ~/.ssh/thesis_known_hosts. Test each intended alias, for example:
+Full detail — what each step actually does, where scope docs and API keys live, why targets get
+power-cycled the way they do, the fairness/anti-leak mechanisms baked into the harness — is in
+[`engagement-tool/ENGAGEMENT_TOOL_README.md`](engagement-tool/ENGAGEMENT_TOOL_README.md).
 
-       ssh -F ssh_config thesis-kali id
-       ssh -F ssh_config thesis-weak "sudo -n id -u"
-       ssh -F ssh_config thesis-pfsense id
+The attacker runs Claude Code natively on Kali against the scope doc in `engagement-tool/scope/`;
+the defender is `engagement-tool/defender_agent.py`, a Mistral-driven agent with a single
+`execute(target, command)` tool over SSH. Both read their API key from a plain-text file
+(`engagement-tool/defender.txt`, `engagement-tool/attacker.txt`) — see the tool's own README for
+which is required vs. optional right now.
 
-3. Configure reset.local.json with the GNS3 project and target UUIDs, jump host, key, local GNS3 server configuration, and absolute disk paths. The baseline root must contain weak/ and iot/, each with SHA256SUMS, hda_disk.qcow2 and OVMF_VARS_4M.fd. The jump account needs permission to swap disks on the GNS3 VM. Check each UUID against its intended node before the first reset.
+## What's still used directly from this repo
 
-4. For reset provisioning, place the organizer’s existing Linux maintenance key in private/lab-admin-key. The frozen guests must accept that key for labadmin with passwordless sudo. Place verified OpenSSH host-key entries for the jump hostname and both target IPs in private/target-known-hosts. Keep the defender key pair at ~/.ssh/thesis_blue and ~/.ssh/thesis_blue.pub. These credentials are supplied locally by the operator.
+- `scoring.py` — the one real scoring ledger (`private/score.db`). `engagement.py collect` calls
+  this to submit captured flags and check for automatable blue "block" credit; you can also run it
+  by hand for manual referee attestation (`identify`/`remediate`, which aren't automated on
+  purpose — see `RESEARCH.md`'s verification matrix for why).
+- `install_flags.py` — plants the four `FLAG{...}` fixtures on Ubuntu-Weak before a round.
+  `engagement.py start` calls this automatically; see it here if you need to run it by hand.
+- `RESEARCH.md` — the scoring design and point-table rationale. Still accurate; read this before
+  changing anything about how points are awarded.
 
-5. Run the offline tests:
+## Files reflecting an earlier, superseded design
 
-       python -m unittest discover -s tests
-
-## Run a trial
-
-1. Verify the starting baseline and SSH connectivity. Prepare a fresh round and generate its private flag bundle:
-
-       python trials.py prepare pilot-001 --condition ai-versus-ai --seconds 1800
-       python scoring.py --db private/trials/pilot-001/score.db create pilot-001 --seconds 86400 --output private/trials/pilot-001/flags.json
-
-2. Transfer install_flags.py and the round’s flags.json securely to the freshly restored Ubuntu-Weak guest. On that guest, run `sudo python3 install_flags.py flags.json`. Verify installation and remove the transferred flag bundle before participant access.
-3. In private/trials/pilot-001, record the baseline hash, verification time and flag checks in flags-installed.txt. Review the generated participant scopes and target aliases. Set baseline_verified and connectivity_verified in trial.json to true after checking them.
-4. Start the timer and participant bridges:
-
-       python trials.py run private/trials/pilot-001
-
-5. Connect each participant through its matching role adapter and token. The default scored blue scope is pfSense and Ubuntu-Weak. During the round, the organizer records legitimate-service checks and referee evidence. Save scores.json, logs and evidence before resetting. See [experiment conditions](EXPERIMENTS.md) for the human-terminal workflow and [operator guide](OPERATOR_GUIDE.md) for bridge calls, scoring and evidence commands.
-
-## Reset after a test
-
-    python reset-lab.py
-
-The command stops Ubuntu-Weak and Ubuntu-IoT in turn, verifies the baseline checksums, preserves each previous disk under pre-reset, restores the baseline, boots the guest, and verifies blue SSH and passwordless sudo. Append weak or iot to select a single guest. If only access restoration needs retrying after boot, use `python reset-lab.py weak --restore-only`. Changes made during a trial to pfSense, Kali or UbuntuBase require separate recovery.
+`bridge.py`, `client.py`, `trials.py`, `human.py`, `ssh_config.example`, `red.example.json`,
+`blue.example.json`, `reset.example.json`, and the `reset-lab.py` in *this* directory (not
+`engagement-tool/reset-lab.py`, which is a different, actually-used script with hardcoded node
+IDs rather than a `reset.local.json`) all belong to an earlier design: two independently
+authenticated HTTP-to-SSH bridges that a model's own tool-calling adapter would connect to,
+configured via `ssh_config`/`red.json`/`blue.json`. That design was superseded by having the
+attacker run natively on Kali (via Opencode) and the defender as a direct Python/SSH agent
+(`defender_agent.py`) — no bridge API in between. These files are kept for reference, not part of
+the current workflow. `OPERATOR_GUIDE.md` and `EXPERIMENTS.md` describe that older design in
+detail and haven't been updated to match the current one.
