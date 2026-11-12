@@ -162,6 +162,20 @@ def verify_claimed_files(gns3_vm, content: str, target: str) -> list:
     return results
 
 
+def _content_text(content) -> str:
+    """Mistral can return `content` as a list of chunks ({'type': 'thinking'|'text', ...}) instead of
+    a plain string. Keep only the visible text chunks; the rest (reasoning) is dropped."""
+    if isinstance(content, str) or content is None:
+        return content or ""
+    parts = []
+    for ch in content:
+        if isinstance(ch, str):
+            parts.append(ch)
+        elif isinstance(ch, dict) and ch.get("type") == "text":
+            parts.append(str(ch.get("text", "")))
+    return "\n".join(p for p in parts if p)
+
+
 def mistral_chat(api_key: str, messages: list, model: str) -> dict:
     r = requests.post(
         "https://api.mistral.ai/v1/chat/completions",
@@ -212,6 +226,7 @@ def main():
 
             choice = resp["choices"][0]
             msg = choice["message"]
+            msg["content"] = _content_text(msg.get("content"))
             messages.append(msg)
 
             if msg.get("content"):
