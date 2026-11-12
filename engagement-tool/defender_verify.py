@@ -236,12 +236,10 @@ def main():
         client.close()
     a.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     for r in report["results"]:
-        print(f"[{r['objective']}] fixed={r['state_ok']} service_ok={r['legit_ok']} claimed={r['claimed']}
-"
-              f"      state: {r.get('state_observed', r.get('error'))}")
+        print(f"[{r['objective']}] fixed={r['state_ok']} service_ok={r['legit_ok']} claimed={r['claimed']}"
+              f"\n      state: {r.get('state_observed', r.get('error'))}")
     fixed = sum(r["state_ok"] for r in report["results"])
-    print(f"
-{fixed}/{len(report['results'])} objectives fixed on host; "
+    print(f"\n{fixed}/{len(report['results'])} objectives fixed on host; "
           f"{len(report['unmatched_claims_for_referee'])} claim(s) unmatched -> {a.out}")
 
 if __name__ == "__main__":
