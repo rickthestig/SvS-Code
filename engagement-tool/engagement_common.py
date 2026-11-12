@@ -223,13 +223,23 @@ def install_flags(round_name: str, reuse_bundle: bool = False) -> None:
 
 def reset_harness() -> None:
     """Runs the harness's own reset.sh (clears loot/logs/scans/scope, prior Claude session
-    history, stray $HOME files, shell history, known_hosts)."""
+    history, stray $HOME files, shell history, known_hosts). Also removes anything the opencode
+    attacker backend leaves behind -- the per-round ~/harness/opencode.json (regenerated fresh
+    each launch_attacker_opencode() call anyway, but stale credentials config sitting around
+    between rounds is the same kind of leak reset.sh already treats the Claude project dir as) and
+    opencode's own local session database (opencode run always starts a fresh session with no
+    -c/--continue/-s flag, so this isn't currently a head-start risk the way reset.sh's Claude
+    project-dir wipe is -- just kept in parity with it, defensively, for whoever edits this next).
+    This runs from Python directly rather than being added to the uploaded reset.sh, so it takes
+    effect without needing that script re-synced to Kali."""
     client = kali_ssh()
     try:
         rc, out, err = run(client, "bash ~/harness/reset.sh")
         print(out.strip())
         if rc != 0:
             raise RuntimeError(f"harness reset failed: {err}")
+        run(client, "rm -f ~/harness/opencode.json; "
+                     "rm -rf ~/.local/share/opencode/opencode.db ~/.local/share/opencode/repos 2>/dev/null")
     finally:
         client.close()
 
@@ -268,24 +278,28 @@ def verify_scope_present() -> bool:
 # Launch
 # ---------------------------------------------------------------------------
 
-def launch_attacker(model: str = "opus", retries: int = 6, retry_delay: int = 5) -> str:
+def launch_attacker(model: str = "opus", retries: int = 6, retry_delay: int = 5,
+                     key: str | None = None) -> str:
     """Launches Claude Code in the background on Kali, gated on the scope doc actually being
     present. Retries on the (observed, intermittent) auto-mode classifier block -- a known
     false-positive pattern for `claude --background --allow-dangerously-skip-permissions`,
     not a real denial; every prior occurrence this engagement has succeeded on retry.
 
-    If ATTACKER_KEY_FILE exists and is non-empty, its contents are exported as
-    ANTHROPIC_API_KEY for this launch -- for the full run, where the attacker authenticates via
-    key rather than whatever login session happens to already be on Kali. Falls back to Kali's
-    existing `claude` auth state if the file isn't there (today's test runs don't need it). The
-    key itself is embedded in the one-shot remote command but never appears in anything this
-    function prints or raises -- only the command's own stdout/stderr do, and that command never
-    echoes its own env var."""
+    `key`, if given, is used as-is for ANTHROPIC_API_KEY (the caller has already classified and
+    stripped any `# provider:`/`# model:` directive lines off of it -- see classify_attacker_key).
+    Otherwise this reads ATTACKER_KEY_FILE itself raw, for backward compatibility with a plain
+    key-only file and any other caller. Falls back to Kali's existing `claude` auth state if
+    neither produces a key (today's test runs don't need one). The key itself is embedded in the
+    one-shot remote command but never appears in anything this function prints or raises -- only
+    the command's own stdout/stderr do, and that command never echoes its own env var."""
     env_prefix = ""
-    if ATTACKER_KEY_FILE.is_file():
-        key = ATTACKER_KEY_FILE.read_text(encoding="utf-8").strip()
-        if key:
-            env_prefix = f"export ANTHROPIC_API_KEY={shlex.quote(key)} && "
+    if key:
+        env_prefix = f"export ANTHROPIC_API_KEY={shlex.quote(key)} && "
+        print(f"[attacker launch] using Anthropic API key from {ATTACKER_KEY_FILE.name}.")
+    elif ATTACKER_KEY_FILE.is_file():
+        file_key = ATTACKER_KEY_FILE.read_text(encoding="utf-8").strip()
+        if file_key:
+            env_prefix = f"export ANTHROPIC_API_KEY={shlex.quote(file_key)} && "
             print(f"[attacker launch] using API key from {ATTACKER_KEY_FILE.name}.")
         else:
             print(f"[attacker launch] {ATTACKER_KEY_FILE.name} exists but is empty -- "
@@ -316,18 +330,172 @@ def launch_attacker(model: str = "opus", retries: int = 6, retry_delay: int = 5)
     raise RuntimeError(f"attacker launch failed after {retries} attempts: {last_err}")
 
 
-def launch_attacker_verified(model: str = "opus", settle: int = 75, attempts: int = 3) -> str:
-    """launch_attacker() only retries when no session id comes back. A session can also start and
-    then sit `blocked` (observed: idle/blocked with empty logs for 25+ minutes while the defender
-    worked against an unattacked target). After launching, give it `settle` seconds, check the state
-    the CLI reports, and if it is blocked, stop that session and launch a fresh one."""
+# ---------------------------------------------------------------------------
+# Multi-provider attacker keys. `claude` (Claude Code) only ever authenticates
+# against Anthropic, so any other provider's key has to run through a
+# different CLI -- `opencode`, which is already installed on Kali and whose
+# AGENTS.md-driven harness docs were written CLI-agnostically for exactly
+# this (see harness-AGENTS.md: "regardless of which agent CLI is running
+# you"). Everything below was verified live against Kali's own
+# ~/.cache/opencode/models.json and a real (defender's, already-proven-valid)
+# Mistral key, not guessed -- see the engagement session that built this.
+# ---------------------------------------------------------------------------
+
+# provider id (opencode/models.dev) -> {env var opencode's AI-SDK adapter reads,
+# a capable default model string in "provider/model" form}. Anthropic keeps the
+# `claude` CLI path (model=None; unused there).
+PROVIDER_REGISTRY = {
+    "anthropic": {"env": "ANTHROPIC_API_KEY", "model": None},
+    "openai":    {"env": "OPENAI_API_KEY", "model": "openai/gpt-5.1"},
+    "google":    {"env": "GOOGLE_GENERATIVE_AI_API_KEY", "model": "google/gemini-pro-latest"},
+    "mistral":   {"env": "MISTRAL_API_KEY", "model": "mistral/mistral-large-latest"},
+    "deepseek":  {"env": "DEEPSEEK_API_KEY", "model": "deepseek/deepseek-v4-pro"},
+    "groq":      {"env": "GROQ_API_KEY", "model": "groq/llama-3.3-70b-versatile"},
+    "xai":       {"env": "XAI_API_KEY", "model": "xai/grok-4.5"},
+}
+
+# Only prefixes that are genuinely unambiguous between these providers. A bare
+# `sk-...` (classic OpenAI vs. DeepSeek's OpenAI-compatible keys both look like
+# this) or an unprefixed random token (Mistral, Groq, ...) can't be told apart
+# by shape -- those require the explicit `# provider:` directive below rather
+# than a guess that could silently launch against the wrong API.
+_KEY_SHAPE = [
+    ("anthropic", re.compile(r"^sk-ant-")),
+    ("google", re.compile(r"^AIza")),
+    ("groq", re.compile(r"^gsk_")),
+    ("xai", re.compile(r"^xai-")),
+    ("openai", re.compile(r"^sk-proj-")),
+]
+
+PROVIDER_DIRECTIVE = re.compile(r"^#\s*provider:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
+MODEL_DIRECTIVE = re.compile(r"^#\s*model:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
+
+
+def classify_attacker_key(raw_text: str) -> dict:
+    """Parse ATTACKER_KEY_FILE's raw text into {'provider', 'model', 'env', 'key'}.
+
+    The file may start with comment directive lines before the key itself, e.g.:
+        # provider: mistral
+        # model: mistral/mistral-large-latest   (optional; overrides the registry default)
+        <the key, on its own line>
+    Directives always win. Without a `# provider:` line, only unambiguous key shapes are
+    auto-detected (see _KEY_SHAPE); anything else raises rather than guessing wrong."""
+    lines = raw_text.splitlines()
+    key_lines = [l for l in lines if l.strip() and not l.strip().startswith("#")]
+    key = "\n".join(key_lines).strip()
+    if not key:
+        raise ValueError("attacker key file has no key content (comments/blank lines only, or empty)")
+
+    m = PROVIDER_DIRECTIVE.search(raw_text)
+    provider = m.group(1).lower() if m else None
+    if provider and provider not in PROVIDER_REGISTRY:
+        raise ValueError(f"unknown provider '{provider}' in the attacker key file's `# provider:` "
+                          f"directive -- supported: {sorted(PROVIDER_REGISTRY)}")
+    if not provider:
+        for pid, pat in _KEY_SHAPE:
+            if pat.match(key):
+                provider = pid
+                break
+    if not provider:
+        raise ValueError(
+            "could not tell this attacker key's provider apart from its shape alone (this happens "
+            "for a bare OpenAI/DeepSeek 'sk-...' key, or a Mistral/Groq-style unprefixed token -- "
+            "those look identical). Add a directive line at the top of the key file, e.g.:\n"
+            "    # provider: mistral\n    <the key itself>\n"
+            f"Supported providers: {sorted(PROVIDER_REGISTRY)}"
+        )
+
+    entry = PROVIDER_REGISTRY[provider]
+    mm = MODEL_DIRECTIVE.search(raw_text)
+    model = mm.group(1) if mm else entry["model"]
+    return {"provider": provider, "model": model, "env": entry["env"], "key": key}
+
+
+def launch_attacker_opencode(provider: str, model: str, env_var: str, key: str,
+                              retries: int = 3, retry_delay: int = 10, settle: int = 8) -> dict:
+    """Launch the attacker via `opencode run` for any non-Anthropic provider.
+
+    opencode has no `--background` flag (confirmed via `opencode run --help`), so this detaches it
+    with `nohup ... &` and tracks it by PID on Kali -- the same pattern already used for the local
+    defender_agent.py process. A per-run opencode.json is written into ~/harness (overwritten each
+    launch): opencode's provider auto-detection does NOT recognize a provider from its env var alone
+    (confirmed live -- `opencode models <id>` and `-m <id>/<model>` both said "Provider not found"
+    with only the env var set); it needs an explicit `provider.<id>.options.apiKey` entry, and
+    `{env:VAR}` substitution inside that entry is what actually resolves it. No extra
+    skip-permissions flag is needed -- the default "build" agent allows bash/file tool calls
+    (confirmed live: `action.permission=bash action.action=allow`)."""
+    cfg = json.dumps({"provider": {provider: {"options": {"apiKey": f"{{env:{env_var}}}"}}}})
+    prompt = "Begin the engagement as described in AGENTS.md and the scope documents."
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        client = kali_ssh()
+        try:
+            run(client, f"test -s ~/harness/scope/AGENT_PENTEST_SCOPE.md && "
+                        f"printf '%s' {shlex.quote(cfg)} > ~/harness/opencode.json")
+            cmd = (
+                f"cd ~/harness && export {env_var}={shlex.quote(key)} && "
+                f"nohup opencode run -m {shlex.quote(model)} {shlex.quote(prompt)} "
+                f"> ~/harness/logs/opencode-attacker.log 2>&1 & echo PID:$!"
+            )
+            rc, out, err = run(client, cmd, timeout=30)
+        finally:
+            client.close()
+        m = re.search(r"PID:(\d+)", out)
+        if not m:
+            last_err = err or out
+            print(f"[attacker launch] opencode attempt {attempt}/{retries} did not produce a PID "
+                  f"-- retrying", flush=True)
+            time.sleep(retry_delay)
+            continue
+        pid = int(m.group(1))
+        time.sleep(settle)  # give it a moment to fail fast (bad key, bad model) before trusting it
+        client = kali_ssh()
+        try:
+            _, out2, _ = run(client, f"ps -p {pid} -o pid= 2>/dev/null; "
+                                      f"grep -Ec 'Unauthorized|ProviderModelNotFoundError|Invalid API' "
+                                      f"~/harness/logs/opencode-attacker.log 2>/dev/null || true")
+        finally:
+            client.close()
+        lines = out2.strip().splitlines()
+        alive = bool(lines) and lines[0].strip() == str(pid)
+        errored = len(lines) > 1 and lines[1].strip() not in ("", "0")
+        if alive and not errored:
+            return {"backend": "opencode", "provider": provider, "model": model, "pid": pid,
+                     "log": "~/harness/logs/opencode-attacker.log"}
+        last_err = "auth/model error in opencode-attacker.log" if errored else f"pid {pid} exited immediately"
+        print(f"[attacker launch] opencode attempt {attempt}/{retries} failed ({last_err}) "
+              f"-- retrying", flush=True)
+        time.sleep(retry_delay)
+    raise RuntimeError(f"opencode attacker launch failed after {retries} attempts: {last_err}")
+
+
+def launch_attacker_verified(model: str = "opus", settle: int = 75, attempts: int = 3) -> dict:
+    """Reads ATTACKER_KEY_FILE (if present/non-empty) once, classifies its provider, and launches
+    via the right backend: `claude` CLI for Anthropic -- unchanged, including the retry-on-blocked-
+    session fix below (launch_attacker() only retries when no session id comes back at all; a
+    session can also start and then sit `blocked`, observed: idle/blocked with empty logs for 25+
+    minutes while the defender worked against an unattacked target) -- or `opencode run` for
+    anything else (OpenAI, Google, Mistral, DeepSeek, Groq, xAI). Returns a dict describing
+    whichever backend actually launched; `model` is only the Claude `--model` alias and is unused
+    for the opencode path, which uses the key file's own registry/`# model:` model instead."""
+    classified = None
+    if ATTACKER_KEY_FILE.is_file() and ATTACKER_KEY_FILE.stat().st_size > 0:
+        classified = classify_attacker_key(ATTACKER_KEY_FILE.read_text(encoding="utf-8"))
+
+    if classified is not None and classified["provider"] != "anthropic":
+        print(f"[attacker launch] key file names provider '{classified['provider']}' -- "
+              f"launching via opencode (model={classified['model']}), not claude.")
+        return launch_attacker_opencode(classified["provider"], classified["model"],
+                                         classified["env"], classified["key"])
+
+    key = classified["key"] if classified else None
     for attempt in range(1, attempts + 1):
-        sid = launch_attacker(model=model)
+        sid = launch_attacker(model=model, key=key)
         time.sleep(settle)
         info = attacker_session_status(sid)
         state = (info or {}).get("state")
         if info is not None and state != "blocked":
-            return sid
+            return {"backend": "claude", "session_id": sid}
         print(f"[attacker launch] session {sid} state={state!r} after {settle}s "
               f"(attempt {attempt}/{attempts}) -- stopping it and relaunching", flush=True)
         client = kali_ssh()
@@ -364,6 +532,26 @@ def attacker_session_status(session_id: str) -> dict | None:
         return None
     finally:
         client.close()
+
+
+def attacker_opencode_alive(pid: int) -> bool:
+    """opencode has no session-registry CLI equivalent to `claude agents --json`; a launched
+    `opencode run` is a single process, so PID liveness on Kali IS its status."""
+    client = kali_ssh()
+    try:
+        _, out, _ = run(client, f"ps -p {pid} -o pid= 2>/dev/null")
+    finally:
+        client.close()
+    return out.strip() == str(pid)
+
+
+def attacker_opencode_stop(pid: int) -> str:
+    client = kali_ssh()
+    try:
+        _, out, err = run(client, f"kill {pid} 2>&1 && echo stopped || echo 'already stopped'")
+    finally:
+        client.close()
+    return out.strip() or err.strip()
 
 
 def latest_defender_transcript() -> pathlib.Path | None:

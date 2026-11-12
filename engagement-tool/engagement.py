@@ -71,8 +71,12 @@ def cmd_start(args) -> None:
                         str(ec.WORK / f"baseline-attacker-pre-{round_name}.json")], cwd=ec.WORK, check=False)
 
     print(f"-- launching attacker (model={args.model}) --")
-    session_id = ec.launch_attacker_verified(model=args.model)
-    print(f"   attacker session: {session_id}")
+    attacker = ec.launch_attacker_verified(model=args.model)
+    if attacker["backend"] == "claude":
+        print(f"   attacker: claude session {attacker['session_id']}")
+    else:
+        print(f"   attacker: opencode pid {attacker['pid']} "
+              f"(provider={attacker['provider']}, model={attacker['model']})")
 
     print("-- launching defender --")
     proc = ec.launch_defender()
@@ -82,14 +86,20 @@ def cmd_start(args) -> None:
 
     ec.save_state(
         round=round_name,
-        attacker_session=session_id,
+        attacker_backend=attacker["backend"],
+        attacker_session=attacker.get("session_id"),
+        attacker_pid=attacker.get("pid"),
+        attacker_provider=attacker.get("provider"),
+        attacker_model=attacker.get("model"),
         defender_pid=proc.pid,
         defender_transcript=str(transcript) if transcript else None,
         started_at=datetime.datetime.now().isoformat(timespec="seconds"),
         model=args.model,
     )
+    attacker_descr = (f"claude session {attacker['session_id']}" if attacker["backend"] == "claude"
+                       else f"opencode pid {attacker['pid']}")
     ec.log_event(
-        f"engagement.py start: round `{round_name}`, attacker session `{session_id}` "
+        f"engagement.py start: round `{round_name}`, attacker: {attacker_descr} "
         f"(model {args.model}), defender pid {proc.pid}."
     )
     print(f"=== Both agents running. `python engagement.py status --watch` to follow along. ===")
@@ -100,6 +110,14 @@ def cmd_start(args) -> None:
 
 
 def _attacker_line(state: dict) -> str:
+    backend = state.get("attacker_backend", "claude")
+    if backend == "opencode":
+        pid = state.get("attacker_pid")
+        if not pid:
+            return "attacker: (no opencode pid recorded)"
+        alive = ec.attacker_opencode_alive(pid)
+        provider = state.get("attacker_provider"); model = state.get("attacker_model")
+        return f"attacker: opencode pid={pid} alive={alive} (provider={provider}, model={model})"
     session_id = state.get("attacker_session")
     if not session_id:
         return "attacker: (no session recorded)"
@@ -107,6 +125,14 @@ def _attacker_line(state: dict) -> str:
     if info is None:
         return f"attacker: session {session_id} not found (exited or stopped)"
     return f"attacker: session {session_id} — status={info.get('status')} state={info.get('state')}"
+
+
+def _attacker_done(state: dict) -> bool:
+    if state.get("attacker_backend") == "opencode":
+        pid = state.get("attacker_pid")
+        return not pid or not ec.attacker_opencode_alive(pid)
+    info = ec.attacker_session_status(state.get("attacker_session", ""))
+    return info is None or info.get("state") == "done"
 
 
 def _defender_line(state: dict) -> tuple[str, bool]:
@@ -153,8 +179,7 @@ def cmd_status(args) -> None:
     try:
         while True:
             snapshot()
-            attacker_info = ec.attacker_session_status(state.get("attacker_session", ""))
-            attacker_done = attacker_info is None or attacker_info.get("state") == "done"
+            attacker_done = _attacker_done(state)
             _, defender_alive = _defender_line(state)
             if attacker_done and not defender_alive:
                 print("\nBoth agents finished.")
@@ -177,14 +202,19 @@ def cmd_stop(args) -> None:
     if not state:
         print("No engagement state found -- nothing to stop.")
         return
-    session_id = state.get("attacker_session")
-    if session_id:
-        client = ec.kali_ssh()
-        try:
-            rc, out, err = ec.run(client, f"claude stop {session_id}")
-            print(out.strip() or err.strip())
-        finally:
-            client.close()
+    if state.get("attacker_backend") == "opencode":
+        pid = state.get("attacker_pid")
+        if pid:
+            print(ec.attacker_opencode_stop(pid))
+    else:
+        session_id = state.get("attacker_session")
+        if session_id:
+            client = ec.kali_ssh()
+            try:
+                rc, out, err = ec.run(client, f"claude stop {session_id}")
+                print(out.strip() or err.strip())
+            finally:
+                client.close()
     pid = state.get("defender_pid")
     if pid:
         try:
@@ -203,7 +233,7 @@ def cmd_stop(args) -> None:
     # flag submission, no attestation because of exactly this race). `collect` itself clears the
     # state file once it has actually used it, so the round only "disappears" after its report
     # exists, not before.
-    ec.save_state(attacker_session=None, defender_pid=None)
+    ec.save_state(attacker_session=None, attacker_pid=None, defender_pid=None)
     print("state cleared (round kept for a pending `collect`)")
 
 
@@ -353,13 +383,23 @@ def cmd_check(args) -> None:
     report("Defender API key present (defender.txt)",
            ec.DEFENDER_KEY_FILE.is_file() and ec.DEFENDER_KEY_FILE.stat().st_size > 0,
            str(ec.DEFENDER_KEY_FILE))
-    # Attacker key is optional today -- launch_attacker() falls back to Kali's existing `claude`
-    # auth state if attacker.txt isn't there, so its absence doesn't fail the check.
+    # Attacker key is optional today -- launch_attacker_verified() falls back to Kali's existing
+    # `claude` auth state if attacker.txt isn't there, so its absence doesn't fail the check. If
+    # it IS there, actually classify it now so a bad/ambiguous key (or an empty one) is caught
+    # here rather than discovered mid-`start`.
     if ec.ATTACKER_KEY_FILE.is_file() and ec.ATTACKER_KEY_FILE.stat().st_size > 0:
-        print(f"[OK] Attacker API key present (attacker.txt) — {ec.ATTACKER_KEY_FILE}")
+        try:
+            c = ec.classify_attacker_key(ec.ATTACKER_KEY_FILE.read_text(encoding="utf-8"))
+            backend = "claude" if c["provider"] == "anthropic" else "opencode"
+            print(f"[OK] Attacker API key present (attacker.txt) — provider={c['provider']} "
+                  f"backend={backend}" + (f" model={c['model']}" if c["model"] else ""))
+        except ValueError as e:
+            report("Attacker API key in attacker.txt is usable", False, str(e))
     else:
         print(f"[INFO] No attacker.txt — attacker will use Kali's existing `claude` auth state "
-              f"instead of an API key. Create {ec.ATTACKER_KEY_FILE} for the full run.")
+              f"instead of an API key. Create {ec.ATTACKER_KEY_FILE} for the full run "
+              f"(any of Anthropic/OpenAI/Google/Mistral/DeepSeek/Groq/xAI; see "
+              f"ENGAGEMENT_TOOL_README.md).")
 
     for label, path in [
         ("defender_agent.py", ec.DEFENDER_SCRIPT),

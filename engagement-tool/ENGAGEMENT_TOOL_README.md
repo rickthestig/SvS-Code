@@ -30,10 +30,33 @@ Both sides read their key from a plain-text file in this folder containing nothi
 
 - `defender.txt` — Mistral API key. Required; `defender_agent.py` exits immediately if it's
   missing or empty.
-- `attacker.txt` — Anthropic API key. Optional for now: if present and non-empty, `start` exports
-  it as `ANTHROPIC_API_KEY` for the attacker's `claude` launch; if absent, the attacker falls back
-  to whatever `claude` auth session is already active on Kali (fine for today's test runs, but the
-  full run needs this file so the attacker authenticates by key rather than a shared login state).
+- `attacker.txt` — the attacker's API key, **any of these providers**: Anthropic, OpenAI, Google
+  (Gemini), Mistral, DeepSeek, Groq, or xAI. Optional: if absent/empty, the attacker falls back to
+  whatever `claude` auth session is already active on Kali.
+
+  An **Anthropic** key launches via the `claude` CLI exactly as before. Any **other** provider
+  launches instead via `opencode` (already installed on Kali; its AGENTS.md-driven harness docs
+  are written CLI-agnostically for this). `opencode` has no background flag, so that attacker runs
+  detached and is tracked by PID rather than a Claude session id — `status`/`stop` handle both
+  transparently.
+
+  Detection is automatic for an Anthropic (`sk-ant-...`), Google (`AIza...`), Groq (`gsk_...`),
+  xAI (`xai-...`), or OpenAI project (`sk-proj-...`) key. A **bare** `sk-...` key (classic OpenAI
+  and DeepSeek look identical) or an unprefixed token (Mistral, Groq's older keys) can't be told
+  apart by shape — for those, put a directive as the file's first line(s):
+  ```
+  # provider: mistral
+  <the key itself>
+  ```
+  An optional second directive overrides the default model opencode is launched with:
+  ```
+  # provider: deepseek
+  # model: deepseek/deepseek-v4-pro
+  <the key itself>
+  ```
+  `engagement.py check` classifies whatever is in `attacker.txt` and reports the provider/backend
+  it resolved to (or a clear error) before you commit to a `start`. See `engagement_common.py`'s
+  `PROVIDER_REGISTRY` for the full provider → env-var/model table.
 
 Both files are gitignored — see `.gitignore` in this folder.
 
