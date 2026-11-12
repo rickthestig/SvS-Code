@@ -1,5 +1,0 @@
-{
-  "role":"red", "port":8765, "token_env":"THESIS_RED_TOKEN",
-  "round":"pilot-001", "db":"private/score.db", "audit":"private/red.jsonl",
-  "targets":{"kali":{"alias":"thesis-kali","config":"ssh_config"}}
-}
