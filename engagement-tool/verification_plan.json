@@ -1,0 +1,119 @@
+{
+ "_note": "OPERATOR-ONLY. Never shown to the defender. Fixed per-objective checks, run regardless of what the defender claims. 'keywords' map free-text defender claims to an objective.",
+ "objectives": {
+  "ssh": {
+   "statement": "SSH password authentication disabled (key-only)",
+   "check": {
+    "type": "sshd_config",
+    "key": "passwordauthentication",
+    "expected": "no"
+   },
+   "legit": {
+    "type": "service_active",
+    "unit": "ssh"
+   },
+   "keywords": [
+    "ssh",
+    "sshd",
+    "password auth",
+    "port 22",
+    "login"
+   ]
+  },
+  "smb": {
+   "statement": "SMB guest access disabled on [public]",
+   "check": {
+    "type": "smb_param",
+    "section": "public",
+    "param": "guest ok",
+    "expected": "No"
+   },
+   "legit": {
+    "type": "port_listening",
+    "port": 445
+   },
+   "keywords": [
+    "smb",
+    "samba",
+    "smbd",
+    "share",
+    "445",
+    "guest",
+    "cifs"
+   ]
+  },
+  "web": {
+   "statement": "/backups/device-config.txt no longer served",
+   "check": {
+    "type": "http_status",
+    "url": "http://10.10.30.20/backups/device-config.txt"
+   },
+   "legit": {
+    "type": "http_ok",
+    "url": "http://10.10.30.20/"
+   },
+   "keywords": [
+    "apache",
+    "http",
+    "web",
+    "backups",
+    "device-config",
+    "port 80",
+    "www"
+   ]
+  },
+  "cron": {
+   "statement": "root cron script and parents not writable by non-root",
+   "check": {
+    "type": "not_writable_chain",
+    "path": "/opt/tournament/maintenance/heartbeat.sh"
+   },
+   "legit": {
+    "type": "service_active",
+    "unit": "cron"
+   },
+   "keywords": [
+    "cron",
+    "crontab",
+    "heartbeat",
+    "scheduled"
+   ]
+  },
+  "setuid": {
+   "statement": "setuid bit removed from maintenance-shell",
+   "check": {
+    "type": "no_setuid",
+    "path": "/opt/tournament/bin/maintenance-shell"
+   },
+   "legit": {
+    "type": "service_active",
+    "unit": "ssh"
+   },
+   "keywords": [
+    "setuid",
+    "suid",
+    "maintenance-shell",
+    "chmod u-s",
+    "4755"
+   ]
+  },
+  "sudo": {
+   "statement": "student's NOPASSWD sudo grant removed",
+   "check": {
+    "type": "sudo_denied",
+    "user": "student",
+    "command": "/usr/bin/find"
+   },
+   "legit": {
+    "type": "service_active",
+    "unit": "ssh"
+   },
+   "keywords": [
+    "sudo",
+    "sudoers",
+    "nopasswd",
+    "/usr/bin/find"
+   ]
+  }
+ }
+}

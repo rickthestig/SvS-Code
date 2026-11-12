@@ -4,15 +4,17 @@ from attest import judge
 
 def att(status): return {"connectivity": {"ssh": {"reachable": True}}, "objectives": {"ssh": {"status": status}}}
 def dfn(**kw):
-    r = {"objective": "ssh", "claimed_stage": "remediate", "verified": True, "state_ok": True, "legit_ok": True}; r.update(kw)
+    r = {"objective": "ssh", "claimed": True, "state_ok": True, "legit_ok": True}; r.update(kw)
     return {"results": [r]}
 
 class T(unittest.TestCase):
     def test_remediate(self): self.assertEqual(judge("ssh", att("open"), att("closed"), dfn(), None)[0], "remediate")
-    def test_block_only(self): self.assertEqual(judge("ssh", att("open"), att("closed"), dfn(claimed_stage="block"), None)[0], "block")
+    def test_block_only(self): self.assertEqual(judge("ssh", att("open"), att("closed"), dfn(state_ok=False), None)[0], "block")
     def test_still_open(self): self.assertIsNone(judge("ssh", att("open"), att("open"), dfn(), None)[0])
-    def test_lying_defender(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), dfn(verified=False, state_ok=False), None)[0])
-    def test_service_broken(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), dfn(verified=False, legit_ok=False), None)[0])
+    def test_undocumented_fix(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), dfn(claimed=False), None)[0])
+    def test_containment_only_is_block_not_remediate(self): self.assertEqual(judge("ssh", att("open"), att("closed"), dfn(state_ok=False), None)[0], "block")
+    def test_lying_defender(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), dfn(state_ok=False, claimed=False), None)[0])
+    def test_service_broken(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), dfn(legit_ok=False), None)[0])
     def test_never_vulnerable(self): self.assertIsNone(judge("ssh", att("closed"), att("closed"), dfn(), None)[0])
     def test_no_baseline_strict(self): self.assertIsNone(judge("ssh", None, att("closed"), dfn(), None)[0])
     def test_assumed_baseline(self): self.assertEqual(judge("ssh", None, att("closed"), dfn(), None, assume_baseline=True)[0], "remediate")

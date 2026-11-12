@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-Defender-side verifier. Reads the defender's explicit remediation manifest and CHECKS every claim
-against the real host state instead of trusting the claim.
-
-The defender (human or AI) writes a manifest (see MANIFEST_SPEC.md) listing what it says it did,
-e.g. "SSH password auth disabled", "setuid bit removed from X". Each claim carries a *typed* check
-from the fixed vocabulary below. This script never executes free-form commands from the manifest:
-arguments are validated and shell-quoted, so a fabricated or injected manifest cannot run anything
-other than these read-only checks. Every claim also needs a `legit` probe proving the legitimate
-service still works (a fix that kills the service is not a fix).
+Defender-side verifier. The defender leaves a plain-language manifest of the tools/access/attack
+vectors it stopped (it is NOT told what the lab's weaknesses are, and does not choose any checks).
+This script runs the operator's own per-objective checks from verification_plan.json against the
+real host -- state of the underlying fix, plus a legitimate-service probe -- and records which of
+the defender's claims cover each objective. Credit needs both: the defender documented it AND the
+operator's check confirms it. Nothing from the manifest is ever executed; it is only read as text.
 
 Usage:
     python defender_verify.py --target weak --manifest path/to/remediation_manifest.json \
@@ -172,30 +169,42 @@ def leg_smb_authed_list(c, s):
 LEGIT_PROBES = {"service_active": leg_service_active, "http_ok": leg_http_ok,
                 "port_listening": leg_port_listening, "smb_authed_list": leg_smb_authed_list}
 
-VALID_OBJECTIVES = {"ssh", "smb", "web", "cron", "setuid", "sudo"}
+PLAN_PATH = WORK / "verification_plan.json"
 
 
-def evaluate(client, manifest: dict) -> dict:
+def match_claims(claims, keywords):
+    """Which of the defender's free-text claims plausibly cover this objective (keyword match on the
+    vector/action/details text). Matching is deliberately generous; the objective's own state check
+    and the attacker probe decide whether the fix is real."""
+    hits = []
+    for c in claims:
+        text = " ".join(str(c.get(k, "")) for k in ("vector", "action", "details", "evidence")).lower()
+        if any(k.lower() in text for k in keywords):
+            hits.append(c.get("id") or c.get("vector"))
+    return hits
+
+
+def evaluate(client, manifest: dict, plan: dict) -> dict:
+    """For EVERY objective in the operator's plan: run the operator-defined state check and
+    legitimate-service probe, and record which defender claims (if any) cover it. The defender never
+    specifies checks, so it cannot choose what gets tested, and a fix it did not document earns
+    nothing even if the host is in fact fixed."""
+    claims = [c for c in manifest.get("claims", []) if isinstance(c, dict)]
     results = []
-    for claim in manifest.get("claims", []):
-        r = {"id": claim.get("id"), "objective": claim.get("objective"),
-             "statement": claim.get("statement"), "claimed_stage": claim.get("stage", "remediate")}
+    for obj, spec in plan["objectives"].items():
+        r = {"objective": obj, "claimed_by": match_claims(claims, spec["keywords"])}
+        r["claimed"] = bool(r["claimed_by"])
         try:
-            if r["objective"] not in VALID_OBJECTIVES:
-                raise ValueError(f"unknown objective {r['objective']!r}")
-            chk, leg = claim["check"], claim["legit"]
-            if chk["type"] not in STATE_CHECKS or leg["type"] not in LEGIT_PROBES:
-                raise ValueError("unknown check/legit type")
-            r["state_ok"], r["state_observed"] = STATE_CHECKS[chk["type"]](client, chk)
-            r["legit_ok"], r["legit_observed"] = LEGIT_PROBES[leg["type"]](client, leg)
-            r["verified"] = bool(r["state_ok"] and r["legit_ok"])
-        except Exception as e:  # noqa: BLE001 -- a malformed/unverifiable claim is simply not verified
-            r.update(state_ok=False, legit_ok=False, verified=False, error=str(e))
+            r["state_ok"], r["state_observed"] = STATE_CHECKS[spec["check"]["type"]](client, spec["check"])
+            r["legit_ok"], r["legit_observed"] = LEGIT_PROBES[spec["legit"]["type"]](client, spec["legit"])
+        except Exception as e:  # noqa: BLE001
+            r.update(state_ok=False, legit_ok=False, error=str(e))
         results.append(r)
+    covered = {i for r in results for i in r["claimed_by"]}
+    unmatched = [c for c in claims if (c.get("id") or c.get("vector")) not in covered]
     return {"round": manifest.get("round"), "target": manifest.get("target"),
             "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-            "claims_total": len(results), "claims_verified": sum(r["verified"] for r in results),
-            "results": results}
+            "claims_total": len(claims), "unmatched_claims_for_referee": unmatched, "results": results}
 
 
 def main():
@@ -214,17 +223,26 @@ def main():
             _, text, _ = ec.run(client, f"cat {shlex.quote(a.manifest)}")
         else:
             text = pathlib.Path(a.manifest).read_text(encoding="utf-8")
-        manifest = json.loads(text)
+        try:
+            manifest = json.loads(text)
+            if not isinstance(manifest, dict):
+                raise ValueError("manifest is not a JSON object")
+        except ValueError as e:  # malformed manifest = no documented claims, not a crash
+            print(f"WARNING: manifest unreadable ({e}); treating as no claims")
+            manifest = {"claims": []}
         manifest.setdefault("target", a.target)
-        report = evaluate(client, manifest)
+        report = evaluate(client, manifest, json.loads(PLAN_PATH.read_text(encoding="utf-8")))
     finally:
         client.close()
     a.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     for r in report["results"]:
-        print(f"[{'VERIFIED' if r['verified'] else 'UNVERIFIED'}] {r['objective']}: {r['statement']}\n"
-              f"      state: {r.get('state_observed', r.get('error'))}\n      legit: {r.get('legit_observed', '-')}")
-    print(f"\n{report['claims_verified']}/{report['claims_total']} claims verified -> {a.out}")
-
+        print(f"[{r['objective']}] fixed={r['state_ok']} service_ok={r['legit_ok']} claimed={r['claimed']}
+"
+              f"      state: {r.get('state_observed', r.get('error'))}")
+    fixed = sum(r["state_ok"] for r in report["results"])
+    print(f"
+{fixed}/{len(report['results'])} objectives fixed on host; "
+          f"{len(report['unmatched_claims_for_referee'])} claim(s) unmatched -> {a.out}")
 
 if __name__ == "__main__":
     main()

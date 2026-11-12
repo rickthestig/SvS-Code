@@ -8,13 +8,13 @@ three machine-checked reports:
 
   attacker_verify.py --label pre   (before defense: objective was `open`)      [--pre]
   attacker_verify.py --label post  (after defense:  objective is `closed`)     [--post]
-  defender_verify.py               (manifest claims checked against host state) [--defender]
+  defender_verify.py               (operator checks of host state + which vectors the defender documented) [--defender]
   defender_verify.py on pre-state  (optional, for objectives the attacker cannot probe) [--defender-pre]
 
 Rules, per objective:
   baseline  The objective must have been vulnerable before the defense. The init/reset script
             builds an identical baseline every round, so this is assumed by default (verify a given
-            host with `defender_verify.py --manifest baseline_manifest.json`: expect 0/6 verified).
+            host with `defender_verify.py --manifest verification_plan.json`: expect 0/6 verified).
             If --pre / --defender-pre evidence is given it is used instead; --strict-baseline
             demands such evidence. Never rewards patching a flaw
             that was absent.
@@ -49,11 +49,15 @@ def load(p):
 
 
 def judge(obj, pre, post, defender, defender_pre, assume_baseline=False):
-    """Return (stage_awarded | None, [reasons]). Pure function -- unit-testable without any VM."""
+    """Return (stage_awarded | None, [reasons]). Pure function -- unit-testable without any VM.
+
+    `defender` is defender_verify.py's report: per objective, the operator's own checks
+    (state_ok = underlying fix in place, legit_ok = legitimate service works) plus `claimed`
+    (did the defender document stopping this vector in its manifest)."""
     why = []
-    claims = [r for r in (defender or {}).get("results", []) if r.get("objective") == obj]
-    if not claims:
-        return None, ["no defender manifest claim for this objective"]
+    r = next((x for x in (defender or {}).get("results", []) if x.get("objective") == obj), None)
+    if r is None:
+        return None, ["objective not in defender verification report"]
 
     # --- baseline: was there actually something to fix? ---
     was_vuln = None
@@ -61,13 +65,13 @@ def judge(obj, pre, post, defender, defender_pre, assume_baseline=False):
         was_vuln = pre["objectives"][obj]["status"] == "open"
         why.append(f"baseline (attacker pre): {pre['objectives'][obj]['status']}")
     elif defender_pre:
-        pre_claims = [r for r in defender_pre.get("results", []) if r.get("objective") == obj]
-        if pre_claims:
-            was_vuln = any(not r.get("state_ok") for r in pre_claims)
+        pr = next((x for x in defender_pre.get("results", []) if x.get("objective") == obj), None)
+        if pr is not None:
+            was_vuln = not pr.get("state_ok")
             why.append(f"baseline (defender pre-state): {'vulnerable' if was_vuln else 'already fixed'}")
     if was_vuln is None and assume_baseline:
         was_vuln = True
-        why.append("baseline: assumed vulnerable (rigid init script; see baseline_manifest.json)")
+        why.append("baseline: assumed vulnerable (rigid init script; see verification_plan.json)")
     if was_vuln is None:
         return None, why + ["no baseline evidence (need attacker --pre or --defender-pre); not awarding"]
     if not was_vuln:
@@ -79,31 +83,23 @@ def judge(obj, pre, post, defender, defender_pre, assume_baseline=False):
         if conn and not any(v["reachable"] for v in conn.values()):
             return None, why + ["target unreachable on every service post-defense (down, not fixed)"]
 
-    # --- attacker side ---
     post_status = (post or {}).get("objectives", {}).get(obj, {}).get("status", "not_probeable")
-    attacker_confirms = post_status == "closed"
     why.append(f"attacker post probe: {post_status}")
+    why.append(f"operator checks: underlying fix={r.get('state_ok')} service works={r.get('legit_ok')}; "
+               f"defender documented it={r.get('claimed')}")
 
-    verified = [r for r in claims if r.get("verified")]
-    unverified = [r for r in claims if not r.get("verified")]
-    for r in unverified:
-        why.append(f"UNVERIFIED claim '{r.get('statement')}': state_ok={r.get('state_ok')} "
-                   f"legit_ok={r.get('legit_ok')} {r.get('error', '')}")
-    if not verified:
-        return None, why + ["no defender claim passed both its state check and legitimate-service probe"]
+    if not r.get("claimed"):
+        return None, why + ["defender did not document stopping this vector in its manifest"]
+    if not r.get("legit_ok"):
+        return None, why + ["legitimate service broken (a fix that kills the service is not a fix)"]
+    if post_status == "open":
+        return None, why + ["attacker can still reach it; not awarding"]
 
-    # A not_probeable objective (cron/setuid/sudo without a low-priv login) cannot get attacker
-    # confirmation; it is then judged on defender state + legit probe + baseline only, for remediate.
-    if not attacker_confirms and post_status != "not_probeable":
-        return None, why + ["attacker can still exploit it (or probe inconclusive); not awarding"]
-
-    wants_remediate = any(r.get("claimed_stage") == "remediate" for r in claims)
-    if wants_remediate and not unverified:
-        return "remediate", why + (["attacker-confirmed closed"] if attacker_confirms
-                                   else ["no attacker probe possible; defender-state verified only"])
-    if attacker_confirms:
-        return "block", why + ["attacker-confirmed closed, defender claim + service probe verified"]
-    return None, why + ["block needs attacker confirmation; remediate needs all claims verified and stage=remediate"]
+    if r.get("state_ok"):
+        return "remediate", why + ["underlying flaw fixed, service works, documented"]
+    if post_status == "closed":
+        return "block", why + ["attacker blocked and service works, but underlying flaw not corrected (containment only)"]
+    return None, why + ["no attacker confirmation and underlying flaw not fixed"]
 
 
 def main():
@@ -133,7 +129,8 @@ def main():
             "round": a.round, "objective": obj, "stage": stage, "reasons": reasons,
             "attacker_pre": pre and pre["objectives"].get(obj), "attacker_post": post["objectives"].get(obj),
             "post_connectivity": post.get("connectivity"),
-            "defender_claims": [r for r in dfn["results"] if r.get("objective") == obj],
+            "defender_report": [r for r in dfn["results"] if r.get("objective") == obj],
+            "unmatched_claims": dfn.get("unmatched_claims_for_referee"),
             "defender_checked_at": dfn.get("checked_at"), "attacker_checked_at": post.get("checked_at"),
         }, indent=2), encoding="utf-8")
         r = subprocess.run([sys.executable, str(SCORING_PY), "--db", a.db, "attest",
