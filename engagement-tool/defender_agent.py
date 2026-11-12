@@ -90,6 +90,10 @@ def _redact(text: str) -> str:
 
 
 def ssh_execute(gns3_vm, target: str, command: str, timeout: int = 60) -> str:
+    if target not in TARGETS:
+        return json.dumps({"error": f"invalid target {target!r}; must be one of {list(TARGETS)}"})
+    if not isinstance(command, str) or not command.strip():
+        return json.dumps({"error": "empty or missing command"})
     ip = TARGETS[target]
     try:
         channel = gns3_vm.get_transport().open_channel(
@@ -258,7 +262,12 @@ def main():
                 break
 
             for tc in tool_calls:
-                args = json.loads(tc["function"]["arguments"])
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                    if not isinstance(args, dict):
+                        raise ValueError("arguments not an object")
+                except ValueError:
+                    args = {}
                 last_target = args.get("target") or last_target
                 transcript(f"\n**[turn {turn}] tool_call** `execute` "
                            f"target={args.get('target')} command=`{args.get('command')}`")

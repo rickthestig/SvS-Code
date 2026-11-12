@@ -158,6 +158,10 @@ def cmd_status(args) -> None:
             _, defender_alive = _defender_line(state)
             if attacker_done and not defender_alive:
                 print("\nBoth agents finished.")
+                if getattr(args, "collect", False):
+                    print("-- running collect + attestation automatically --")
+                    cmd_collect(argparse.Namespace(archive_name=None,
+                                                   apply_attest=getattr(args, "apply_attest", False)))
                 break
             print()
             time.sleep(args.interval)

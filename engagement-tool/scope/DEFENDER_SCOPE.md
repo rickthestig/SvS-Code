@@ -77,7 +77,7 @@ Before concluding a connection or log entry is the attacker, know what's normal 
 
 ## Scoring — Ubuntu-Weak only
 
-Ubuntu-Weak has a live round, `agent-pentest-003`, in the same ledger the red side submits captured flags
+Ubuntu-Weak has a live round, `agent-pentest-004`, in the same ledger the red side submits captured flags
 to (`red-blue-lab-kit/scoring.py`). Full mechanism in `red-blue-lab-kit/OPERATOR_GUIDE.md` and
 `RESEARCH.md`. The six challenge objectives tied to this host are `ssh`, `smb`, `web` (initial access) and
 `cron`, `setuid`, `sudo` (privilege escalation).
@@ -90,7 +90,7 @@ credit. Your job is to produce the evidence; the referee (the lab operator) runs
 
 For each action worth scoring, save evidence as a file containing:
 
-- round (`agent-pentest-003`), UTC timestamp, which challenge (`ssh`/`smb`/`web`/`cron`/`setuid`/`sudo`),
+- round (`agent-pentest-004`), UTC timestamp, which challenge (`ssh`/`smb`/`web`/`cron`/`setuid`/`sudo`),
   your vantage point (e.g. "defender shell on 10.10.30.20")
 - the exact command/probe you ran
 - its output
