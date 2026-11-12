@@ -316,6 +316,28 @@ def launch_attacker(model: str = "opus", retries: int = 6, retry_delay: int = 5)
     raise RuntimeError(f"attacker launch failed after {retries} attempts: {last_err}")
 
 
+def launch_attacker_verified(model: str = "opus", settle: int = 75, attempts: int = 3) -> str:
+    """launch_attacker() only retries when no session id comes back. A session can also start and
+    then sit `blocked` (observed: idle/blocked with empty logs for 25+ minutes while the defender
+    worked against an unattacked target). After launching, give it `settle` seconds, check the state
+    the CLI reports, and if it is blocked, stop that session and launch a fresh one."""
+    for attempt in range(1, attempts + 1):
+        sid = launch_attacker(model=model)
+        time.sleep(settle)
+        info = attacker_session_status(sid)
+        state = (info or {}).get("state")
+        if info is not None and state != "blocked":
+            return sid
+        print(f"[attacker launch] session {sid} state={state!r} after {settle}s "
+              f"(attempt {attempt}/{attempts}) -- stopping it and relaunching", flush=True)
+        client = kali_ssh()
+        try:
+            run(client, f"claude stop {shlex.quote(sid)}")
+        finally:
+            client.close()
+    raise RuntimeError(f"attacker stayed blocked/unstartable after {attempts} launches")
+
+
 def launch_defender() -> subprocess.Popen:
     """Launches the Mistral defender as a real child process of THIS script (not a detached
     shell job) -- the state file records its PID so `status`/`stop` can find it later even

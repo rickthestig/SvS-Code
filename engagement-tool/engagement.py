@@ -71,7 +71,7 @@ def cmd_start(args) -> None:
                         str(ec.WORK / f"baseline-attacker-pre-{round_name}.json")], cwd=ec.WORK, check=False)
 
     print(f"-- launching attacker (model={args.model}) --")
-    session_id = ec.launch_attacker(model=args.model)
+    session_id = ec.launch_attacker_verified(model=args.model)
     print(f"   attacker session: {session_id}")
 
     print("-- launching defender --")
