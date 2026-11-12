@@ -108,12 +108,45 @@ reach, and name files so it's obvious which challenge/stage they're evidence for
 
 ### Required: remediation manifest
 
-When you finish (and whenever you complete a fix), write `/home/defender/remediation_manifest.json` on
-Ubuntu-Weak listing each fix as an explicit claim, e.g. "SSH password auth disabled", "root login
-blocked", "setuid bit removed", "cron script not writable". Format: `engagement-tool/MANIFEST_SPEC.md`.
-The operator's verifier scripts re-check every claim against the live host, re-run the attacker's
-probe, and confirm the legitimate service still works. Claims that don't hold up are marked
-unverified and earn nothing, so only list what you actually did and tested.
+Blue credit is awarded only for fixes you list explicitly and that an automated verifier can confirm.
+Before you finish (and update it each time you complete a fix), write
+`/home/defender/remediation_manifest.json` **on Ubuntu-Weak** (`weak`) as valid JSON:
+
+```json
+{"round": "<round>", "target": "weak", "claims": [
+  {"id": "c1", "objective": "ssh", "stage": "remediate",
+   "statement": "SSH password authentication disabled",
+   "check": {"type": "sshd_config", "key": "passwordauthentication", "expected": "no"},
+   "legit": {"type": "service_active", "unit": "ssh"}}
+]}
+```
+
+One claim per fix. `objective` is one of `ssh smb web cron setuid sudo`. `stage` is `block` (attack
+contained) or `remediate` (underlying flaw fixed). Every claim needs a `check` (proves the fix is in
+place) and a `legit` probe (proves the legitimate service still works). Only these types exist:
+
+| `check.type` | arguments |
+|---|---|
+| `sshd_config` | `key`, `expected` (effective `sshd -T` value, lowercase key) |
+| `smb_param` | `section`, `param`, `expected` (e.g. `public`, `guest ok`, `No`) |
+| `http_status` | `url`, `expected` (list, default `[403, 404]`) |
+| `not_writable_chain` | `path` (file and every parent root-owned, not group/world writable) |
+| `no_setuid` | `path` (setuid/setgid bit absent) |
+| `no_suid_anywhere` | `roots` (optional list) |
+| `sudo_denied` | `user`, `command` (optional) |
+| `path_absent` | `path` |
+| `user_locked` | `user` |
+
+| `legit.type` | arguments |
+|---|---|
+| `service_active` | `unit` (e.g. `ssh`, `apache2`, `smbd`, `cron`) |
+| `http_ok` | `url`, `expected` (default `[200]`) |
+| `port_listening` | `port` |
+
+After the operator's run, a verifier re-checks each claim against the live host, and the attacker's
+probe is re-run from outside. Claims that do not hold, or whose legitimate service is broken, earn
+nothing -- list only what you actually did and tested. Paths and values are plain text (no shell
+metacharacters). Mention the manifest path in your final message.
 
 ### A note on the `ssh`/`smb`/`web` flag markers
 

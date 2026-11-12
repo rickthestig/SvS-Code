@@ -93,6 +93,10 @@ def cmd_start(args) -> None:
         f"(model {args.model}), defender pid {proc.pid}."
     )
     print(f"=== Both agents running. `python engagement.py status --watch` to follow along. ===")
+    if args.follow:
+        # Block until both agents finish, then collect results and run the attestations.
+        cmd_status(argparse.Namespace(watch=True, interval=30, collect=True,
+                                      apply_attest=args.apply_attest))
 
 
 def _attacker_line(state: dict) -> str:
@@ -372,12 +376,20 @@ def main() -> None:
                                "still power-cycles them cleanly before launch.")
     p_start.add_argument("--baseline-probe", action="store_true",
                           help="Run attacker_verify.py --label pre before launch (adds attacker-IP noise to target logs).")
+    p_start.add_argument("--follow", action="store_true",
+                          help="After launch, watch until both agents finish, then run collect + attestation.")
+    p_start.add_argument("--apply-attest", action="store_true",
+                          help="With --follow: write verified blue awards to the ledger (default: dry run).")
     p_start.add_argument("--model", default="opus", help="Attacker's Claude Code model alias (default: opus).")
     p_start.set_defaults(func=cmd_start)
 
     p_status = sub.add_parser("status", help="Show both agents' current status.")
     p_status.add_argument("--watch", action="store_true", help="Keep refreshing until both agents finish.")
     p_status.add_argument("--interval", type=int, default=30, help="Seconds between refreshes (default 30).")
+    p_status.add_argument("--collect", action="store_true",
+                          help="With --watch: when both agents finish, run collect + attestation automatically.")
+    p_status.add_argument("--apply-attest", action="store_true",
+                          help="With --collect: write verified blue awards to the ledger (default: dry run).")
     p_status.set_defaults(func=cmd_status)
 
     p_stop = sub.add_parser("stop", help="Stop both agents.")
