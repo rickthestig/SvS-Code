@@ -195,10 +195,16 @@ def cmd_stop(args) -> None:
     ec.log_event(f"engagement.py stop: round `{state.get('round')}` stopped by operator.")
     # Not a reset -- `start` already resets everything itself (targets, harness, scope docs)
     # every time it runs, regardless of what state it finds, so there's nothing here to
-    # duplicate. This just clears the dead session/PID out of state so a `status` run between
-    # now and the next `start` doesn't show stale info.
-    ec.STATE_FILE.unlink(missing_ok=True)
-    print("state cleared")
+    # duplicate. Clear the now-dead session/PID so a `status` run doesn't show stale info --
+    # but KEEP the round name and defender_transcript. A `--follow`/`--collect` watcher running
+    # in another process only notices the agents are gone on its NEXT poll, which happens after
+    # this call returns; if `round` were wiped here too, that watcher's auto `collect` would find
+    # no state and silently build nothing (observed: round agent-pentest-006 got no archive, no
+    # flag submission, no attestation because of exactly this race). `collect` itself clears the
+    # state file once it has actually used it, so the round only "disappears" after its report
+    # exists, not before.
+    ec.save_state(attacker_session=None, defender_pid=None)
+    print("state cleared (round kept for a pending `collect`)")
 
 
 def cmd_collect(args) -> None:
@@ -304,6 +310,10 @@ def cmd_collect(args) -> None:
 
     ec.log_event(f"engagement.py collect: round `{round_name}` archived to `{dest.name}`; "
                  f"submitted flags: {submitted or 'none'}.")
+    # The round's report now exists on disk -- clear state so it isn't re-collected by a later
+    # stray `--follow` poll, and so `status` on an idle session says so plainly instead of
+    # pointing at an already-archived round.
+    ec.STATE_FILE.unlink(missing_ok=True)
     print(f"=== Done. Archive: {dest} ===")
 
 
