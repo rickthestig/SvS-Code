@@ -63,6 +63,13 @@ def cmd_start(args) -> None:
         sys.exit(1)
     print("-- scope doc verified present --")
 
+    if args.baseline_probe:
+        # Opt-in: this probe comes from Kali's IP, so it WILL appear in the target logs as attacker
+        # traffic right before the defender starts reading them. Off by default for that reason.
+        print("-- capturing pre-defense attacker baseline (opt-in) --")
+        subprocess.run([sys.executable, "attacker_verify.py", "--label", "pre", "--out",
+                        str(ec.WORK / f"baseline-attacker-pre-{round_name}.json")], cwd=ec.WORK, check=False)
+
     print(f"-- launching attacker (model={args.model}) --")
     session_id = ec.launch_attacker(model=args.model)
     print(f"   attacker session: {session_id}")
@@ -248,18 +255,31 @@ def cmd_collect(args) -> None:
             print(f"   submit {objective}: {r.stdout.strip() or r.stderr.strip()}")
             submitted.append(objective)
 
-    print("-- checking for automatable blue 'block' credit (auto_attest.py) --")
-    report_path = dest / "attacker-final-report.md"
+    print("-- verifying blue claims: attacker probes + defender manifest check (attest.py) --")
     db_path = ec.LAB_KIT_DIR / "private" / "score.db"
-    if report_path.is_file():
-        for objective in ("ssh", "smb", "web", "cron", "setuid", "sudo"):
-            r = subprocess.run(
-                [sys.executable, "auto_attest.py", round_name, objective,
-                 "--attacker-report", str(report_path), "--db", str(db_path), "--yes"],
-                cwd=ec.WORK, capture_output=True, text=True,
-            )
-            out = (r.stdout or r.stderr).strip().splitlines()
-            print(f"   {objective}: {out[-1] if out else '(no output)'}")
+    post, dfn = dest / "attacker-verify-post.json", dest / "defender-verify.json"
+    pre = ec.WORK / f"baseline-attacker-pre-{round_name}.json"
+    manifest = dest / "remediation_manifest.json"
+    tc = ec.target_ssh(ec.NODES["weak"][1])
+    try:
+        sftp = tc.open_sftp()
+        try:
+            sftp.get("/home/defender/remediation_manifest.json", str(manifest))
+        except FileNotFoundError:
+            print("   defender wrote no /home/defender/remediation_manifest.json -- no blue credit possible")
+        sftp.close()
+    finally:
+        tc.close()
+    if manifest.is_file():
+        subprocess.run([sys.executable, "attacker_verify.py", "--label", "post", "--out", str(post)], cwd=ec.WORK)
+        subprocess.run([sys.executable, "defender_verify.py", "--manifest", str(manifest), "--out", str(dfn)], cwd=ec.WORK)
+        cmd = [sys.executable, "attest.py", round_name, "--post", str(post), "--defender", str(dfn),
+               "--db", str(db_path), "--evidence-dir", str(dest / "attest-evidence")]
+        if pre.is_file():
+            cmd += ["--pre", str(pre)]
+        if args.apply_attest:
+            cmd.append("--apply")
+        subprocess.run(cmd, cwd=ec.WORK)
 
     print("-- snapshotting scoring standing + ledger --")
     r = subprocess.run([sys.executable, "scoring.py", "report", round_name],
@@ -350,6 +370,8 @@ def main() -> None:
     p_start.add_argument("--skip-target-reset", action="store_true",
                           help="Don't disk-reset targets or reinstall flags (for a quick relaunch); "
                                "still power-cycles them cleanly before launch.")
+    p_start.add_argument("--baseline-probe", action="store_true",
+                          help="Run attacker_verify.py --label pre before launch (adds attacker-IP noise to target logs).")
     p_start.add_argument("--model", default="opus", help="Attacker's Claude Code model alias (default: opus).")
     p_start.set_defaults(func=cmd_start)
 
@@ -363,6 +385,8 @@ def main() -> None:
 
     p_collect = sub.add_parser("collect", help="Pull results, submit flags, run auto-attest, archive.")
     p_collect.add_argument("--archive-name", help="Archive folder name (default: run-results-<date>-<round>).")
+    p_collect.add_argument("--apply-attest", action="store_true",
+                           help="Write verified blue awards to the ledger (default: dry run, referee reviews first).")
     p_collect.set_defaults(func=cmd_collect)
 
     p_check = sub.add_parser("check", help="Verify GNS3 VM/Kali/targets/keys are all reachable before `start`.")

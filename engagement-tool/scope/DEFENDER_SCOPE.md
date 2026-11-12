@@ -106,6 +106,15 @@ Write each piece of evidence to its own file (plain text or JSON is fine) in a l
 reach, and name files so it's obvious which challenge/stage they're evidence for — e.g.
 `ssh-identify-<timestamp>.txt`, `web-remediate-<timestamp>.txt`.
 
+### Required: remediation manifest
+
+When you finish (and whenever you complete a fix), write `/home/defender/remediation_manifest.json` on
+Ubuntu-Weak listing each fix as an explicit claim, e.g. "SSH password auth disabled", "root login
+blocked", "setuid bit removed", "cron script not writable". Format: `engagement-tool/MANIFEST_SPEC.md`.
+The operator's verifier scripts re-check every claim against the live host, re-run the attacker's
+probe, and confirm the legitimate service still works. Claims that don't hold up are marked
+unverified and earn nothing, so only list what you actually did and tested.
+
 ### A note on the `ssh`/`smb`/`web` flag markers
 
 The red side's objectives on this host are reached through files containing a `FLAG{...}` token at the
