@@ -323,7 +323,7 @@ def launch_defender() -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, str(DEFENDER_SCRIPT)],
         cwd=str(WORK),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=open(WORK / "defender-stderr.log", "w"),  # crashes stay visible
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
     )
 

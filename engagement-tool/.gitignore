@@ -12,3 +12,4 @@ target-known-hosts
 
 __pycache__/
 *.pyc
+defender-stderr.log
