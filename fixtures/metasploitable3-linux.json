@@ -73,18 +73,21 @@
         "tick": 2
       },
       "flag": {
-        "path": "TODO",
-        "owner": "root",
+        "path": "/home/leia_organa/flag.txt",
+        "owner": "leia_organa",
         "mode": "0400"
       },
       "keywords": [
         "ssh",
-        "credential",
+        "leia_organa",
         "password",
+        "credential",
         "22"
       ],
       "check": {
-        "type": "TODO_state_check"
+        "type": "shadow_changed",
+        "user": "leia_organa",
+        "baseline_digest": "06266dc7acaa702cb416fb375081e145244802a586bb282a6c0813c5277b02e7"
       },
       "legit": {
         "type": "service_active",
@@ -93,7 +96,7 @@
       "probe": {
         "type": "TODO_attacker_probe"
       },
-      "statement": "TODO (weak/known credentials on :22, not an sshd config flag)",
+      "statement": "Weak SSH account leia_organa locked or password changed",
       "runs_as": "ssh (upstart)",
       "scoring": "config"
     },
@@ -180,24 +183,23 @@
       "family": "smb",
       "host": "ms3",
       "points": {
-        "capture": 2,
         "block": 2,
         "remediate": 3,
         "tick": 2
-      },
-      "flag": {
-        "path": "TODO",
-        "owner": "root",
-        "mode": "0444"
       },
       "keywords": [
         "smb",
         "samba",
         "share",
+        "public",
+        "writable",
         "445"
       ],
       "check": {
-        "type": "TODO_state_check"
+        "type": "smb_param",
+        "section": "public",
+        "param": "read only",
+        "expected": "Yes"
       },
       "legit": {
         "type": "port_listening",
@@ -206,9 +208,10 @@
       "probe": {
         "type": "TODO_attacker_probe"
       },
-      "statement": "TODO (Samba on :445)",
+      "statement": "SMB [public] web-root share no longer writable (read only)",
       "runs_as": "smbd :445",
-      "scoring": "config"
+      "scoring": "config",
+      "_note": "blue-only: the share is the web root, so a red flag would duplicate http-apache"
     },
     {
       "id": "mysql",

@@ -125,6 +125,18 @@ def chk_user_locked(c, s):
     return bool(re.search(rf"^{re.escape(user)}\s+L", out.strip())), out.strip()
 
 
+def chk_shadow_changed(c, s):
+    """Fixed iff an account's password hash differs from its baseline (a lock or a password change).
+    Stores only a SHA-256 of the baseline hash (`baseline_digest`), never the hash/password itself."""
+    import hashlib
+    user = _safe(s["user"], "user")
+    want = _safe(s["baseline_digest"], "baseline_digest")
+    rc, out, _ = _ro_run(c, f"sudo -n getent shadow {shlex.quote(user)} | cut -d: -f2 | sha256sum | cut -d' ' -f1")
+    now = out.strip()
+    missing = (now == hashlib.sha256(b"").hexdigest()) or not now
+    return (now != want) and not missing, f"hash {'changed/locked' if now != want else 'UNCHANGED (baseline)'}"
+
+
 def chk_db_cred_rejected(c, s):
     """Fixed iff a documented weak DB credential no longer authenticates (checked on-host, read-only).
     Operator-only (the credential lives in verification_plan.json, never shown to the defender)."""
@@ -142,6 +154,7 @@ STATE_CHECKS = {
     "no_suid_anywhere": chk_no_suid_anywhere, "not_writable_chain": chk_not_writable_chain,
     "sudo_denied": chk_sudo_denied, "smb_param": chk_smb_param, "http_status": chk_http_status,
     "user_locked": chk_user_locked, "db_cred_rejected": chk_db_cred_rejected,
+    "shadow_changed": chk_shadow_changed,
 }
 
 
