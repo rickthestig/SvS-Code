@@ -29,7 +29,8 @@ RESEARCH_DIR = TOOL_HOME.parent.parent
 # one unbroken history rather than forking it the day this tool was restructured.
 OUTPUT_DIR = RESEARCH_DIR / "Test Run"
 DEFENDER_KEY_FILE = TOOL_HOME / "defender.txt"
-SCOPE_DOC = TOOL_HOME / "scope" / "DEFENDER_SCOPE.md"
+import os  # noqa: E402
+SCOPE_DOC = pathlib.Path(os.environ.get("ENGAGEMENT_DEFENDER_SCOPE", str(TOOL_HOME / "scope" / "DEFENDER_SCOPE.md")))
 TRANSCRIPT = OUTPUT_DIR / f"defender-transcript-{datetime.datetime.now().strftime('%Y%m%dT%H%M%S')}.md"
 ENGAGEMENT_LOG = OUTPUT_DIR / "ENGAGEMENT_LOG.md"
 
@@ -38,7 +39,9 @@ from lab import connect  # noqa: E402  (lab.py's GNS3-VM SSH connect(), alongsid
 import paramiko  # noqa: E402  (vendored under engagement-tool/pydeps, already on sys.path via lab.py)
 import requests  # noqa: E402
 
-TARGETS = {"weak": "10.10.30.20", "stock": "10.10.20.15", "iot": "10.10.40.20"}
+# Targets come from the engagement (cohort-specific); default to the three-host Ubuntu lab.
+TARGETS = json.loads(os.environ.get("ENGAGEMENT_TARGETS",
+                                    '{"weak": "10.10.30.20", "stock": "10.10.20.15", "iot": "10.10.40.20"}'))
 THESIS_BLUE_KEY = str(pathlib.Path.home() / ".ssh" / "thesis_blue")
 MAX_TURNS = 400
 

@@ -404,14 +404,14 @@ def render_scope(doc: pathlib.Path, round_name: str) -> str:
     return doc.read_text(encoding="utf-8").replace("{{ROUND}}", round_name)
 
 
-def upload_scope_docs(round_name: str) -> None:
+def upload_scope_docs(round_name: str, attacker_scope: pathlib.Path = AGENT_SCOPE_DOC) -> None:
     """Uploads the attacker-facing scope doc (with this round's name filled in) to the harness and
     verifies it landed non-empty. The defender's doc is rendered by defender_agent.py itself."""
     import io
     client = kali_ssh()
     try:
         sftp = client.open_sftp()
-        sftp.putfo(io.BytesIO(render_scope(AGENT_SCOPE_DOC, round_name).encode("utf-8")),
+        sftp.putfo(io.BytesIO(render_scope(attacker_scope, round_name).encode("utf-8")),
                    "/home/kali/harness/scope/AGENT_PENTEST_SCOPE.md")
         sftp.close()
         rc, out, _ = run(client, "test -s ~/harness/scope/AGENT_PENTEST_SCOPE.md && echo SCOPE_OK")
@@ -685,15 +685,20 @@ def launch_attacker_verified(model: str = "opus", settle: int = 75, attempts: in
     raise RuntimeError(f"attacker stayed blocked/unstartable after {attempts} launches")
 
 
-def launch_defender(round_name: str, key_file: pathlib.Path = DEFENDER_KEY_FILE) -> subprocess.Popen:
-    """Launches the Mistral defender as a real child process of THIS script (not a detached
-    shell job) -- the state file records its PID so `status`/`stop` can find it later even
-    from a separate invocation. The round name reaches its scope doc via ENGAGEMENT_ROUND."""
+def launch_defender(round_name: str, key_file: pathlib.Path = DEFENDER_KEY_FILE,
+                    cohort: str = "legacy-weak") -> subprocess.Popen:
+    """Launches the defender as a real child process of THIS script (not a detached shell job) --
+    the state file records its PID so `status`/`stop` can find it later. The round name, targets and
+    scope doc reach the agent via the environment."""
     import os
+    cfg = COHORTS[cohort]
+    env = {**os.environ, "ENGAGEMENT_ROUND": round_name,
+           "DEFENDER_KEY_FILE": str(pathlib.Path(key_file).resolve()),
+           "ENGAGEMENT_TARGETS": json.dumps(cfg["defender_targets"]),
+           "ENGAGEMENT_DEFENDER_SCOPE": str(cfg["defender_scope"])}
     return subprocess.Popen(
         [sys.executable, str(DEFENDER_SCRIPT)],
-        cwd=str(WORK), env={**os.environ, "ENGAGEMENT_ROUND": round_name,
-                            "DEFENDER_KEY_FILE": str(pathlib.Path(key_file).resolve())},
+        cwd=str(WORK), env=env,
         stdout=subprocess.DEVNULL, stderr=open(WORK / "defender-stderr.log", "w"),  # crashes stay visible
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
     )
@@ -812,6 +817,61 @@ def load_fixture_set(name: str = "legacy-weak"):
     sys.path.insert(0, str(FIXTURES_DIR))
     from fixtures import FixtureSet
     return FixtureSet.load(FIXTURES_DIR / f"{name}.json")
+
+
+# Per-cohort provisioning: how a round is set up and who the agents target. The timed scoring reads
+# the fixture set; this maps a cohort to its reset, scope docs and defender targets.
+COHORTS = {
+    "legacy-weak": {
+        "defender_targets": {"weak": "10.10.30.20", "stock": "10.10.20.15", "iot": "10.10.40.20"},
+        "attacker_scope": WORK / "scope" / "AGENT_PENTEST_SCOPE.md",
+        "defender_scope": WORK / "scope" / "DEFENDER_SCOPE.md",
+    },
+    "metasploitable3-linux": {
+        "defender_targets": {"ms3": "10.10.50.20"},
+        "attacker_scope": WORK / "scope" / "AGENT_PENTEST_SCOPE_MS3.md",
+        "defender_scope": WORK / "scope" / "DEFENDER_SCOPE_MS3.md",
+    },
+}
+
+
+def cohort_host_ip(fs) -> str:
+    return next(iter(fs.hosts.values()))["ip"]
+
+
+def install_cohort_flags(round_name: str, fs, reuse_bundle: bool = False) -> None:
+    """Create the round with the cohort's flag objectives and plant the tokens on its host (as the
+    defender account, which has full sudo). Fixture-driven: each flag goes to its own path/owner/mode."""
+    import io
+    host_ip = cohort_host_ip(fs)
+    bundle_path = LAB_KIT_DIR / "private" / f"{round_name}-flags.json"
+    sys.path.insert(0, str(LAB_KIT_DIR))
+    from scoring import Ledger
+    if not reuse_bundle or not bundle_path.is_file():
+        ledger = Ledger(LAB_KIT_DIR / "private" / "score.db")
+        try:
+            tokens = ledger.create(round_name, 86400, objectives=fs.flag_ids)
+        finally:
+            ledger.db.close()
+        bundle_path.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
+    tokens = json.loads(bundle_path.read_text(encoding="utf-8"))
+    locations = {k: {"path": v["path"], "owner": v["owner"], "mode": v["mode"]}
+                 for k, v in fs.flag_locations().items()}
+    fixture_bundle = {"_format": "fixture", "flags": tokens, "locations": locations}
+    client = target_ssh(host_ip)
+    try:
+        sftp = client.open_sftp()
+        sftp.put(str(LAB_KIT_DIR / "install_flags.py"), "/tmp/.inst_flags.py")
+        sftp.putfo(io.BytesIO(json.dumps(fixture_bundle).encode()), "/tmp/.inst_flags.json")
+        sftp.close()
+        rc, out, err = run(client, "sudo -n python3 /tmp/.inst_flags.py --allow-missing /tmp/.inst_flags.json; "
+                                   "sudo -n shred -u /tmp/.inst_flags.py /tmp/.inst_flags.json")
+        result = json.loads(out.strip().splitlines()[-1]) if out.strip() else {"error": err or "no output"}
+        if "placed" not in result:
+            raise RuntimeError(f"cohort flag install failed: {result}")
+        print(f"flags planted on {host_ip}: {result}")
+    finally:
+        client.close()
 
 
 def read_declared_takedown(ip: str) -> str | None:

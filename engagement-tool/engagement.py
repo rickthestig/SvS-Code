@@ -30,35 +30,45 @@ import engagement_common as ec
 
 def cmd_start(args) -> None:
     round_name = args.round or ec.next_round_name()
-    print(f"=== Starting engagement: round {round_name} ===")
+    cohort = getattr(args, "cohort", "legacy-weak")
+    fs = ec.load_fixture_set(cohort)
+    cohort_cfg = ec.COHORTS[cohort]
+    print(f"=== Starting engagement: round {round_name} (cohort {cohort}) ===")
 
-    if not args.skip_target_reset:
-        print("-- resetting targets to clean baseline --")
-        ec.reset_targets()
-        print("-- installing flags --")
-        ec.install_flags(round_name, reuse_bundle=args.reuse_round)
-    else:
-        print("-- skipping target reset/flag install (--skip-target-reset) --")
-        # Still take them down/up cleanly so there's no reset-script noise in defender's logs
-        # and blue access is confirmed fresh, even when reusing already-provisioned disks.
+    if cohort == "legacy-weak":
+        if not args.skip_target_reset:
+            print("-- resetting targets to clean baseline --")
+            ec.reset_targets()
+            print("-- installing flags --")
+            ec.install_flags(round_name, reuse_bundle=args.reuse_round)
+        else:
+            print("-- skipping target reset/flag install (--skip-target-reset) --")
+            for name, (node_id, ip) in ec.NODES.items():
+                if ec.node_status(node_id) == "started":
+                    ec.clean_shutdown(ip, node_id)
+        print("-- powering targets on, restoring blue access --")
         for name, (node_id, ip) in ec.NODES.items():
-            if ec.node_status(node_id) == "started":
-                ec.clean_shutdown(ip, node_id)
+            if ec.node_status(node_id) != "started":
+                ec.start_node(node_id)
+        ec.reset_targets(list(ec.NODES), restore_only=True)
+        print("-- provisioning organizer account (labops) on Ubuntu-Weak --")
+        ec.provision_ops_account()
+    else:
+        if not args.skip_target_reset:
+            print(f"-- resetting {cohort} target to clean baseline --")
+            ec.reset_ms3()  # resets ms3 and recreates its defender + labops accounts
+            print("-- installing flags --")
+            ec.install_cohort_flags(round_name, fs, reuse_bundle=args.reuse_round)
+        else:
+            print("-- skipping target reset (--skip-target-reset); reinstalling flags --")
+            ec.provision_ms3_operators()
+            ec.install_cohort_flags(round_name, fs, reuse_bundle=args.reuse_round)
 
     print("-- resetting attacker harness (loot/logs/scans/scope, shell history, known_hosts) --")
     ec.reset_harness()
 
     print("-- uploading scope docs for this round --")
-    ec.upload_scope_docs(round_name)
-
-    print("-- powering targets on, restoring blue access --")
-    for name, (node_id, ip) in ec.NODES.items():
-        if ec.node_status(node_id) != "started":
-            ec.start_node(node_id)
-    ec.reset_targets(list(ec.NODES), restore_only=True)
-    # Same organizer account in every round (timed or not), so the host is identical across conditions.
-    print("-- provisioning organizer account (labops) on Ubuntu-Weak --")
-    ec.provision_ops_account()
+    ec.upload_scope_docs(round_name, cohort_cfg["attacker_scope"])
 
     if not ec.verify_scope_present():
         print("ERROR: scope doc is not present/non-empty on the harness after upload -- not launching.",
@@ -90,7 +100,7 @@ def cmd_start(args) -> None:
     if mode in ("both", "defender-only"):
         defender = ec.read_key_file(args.defender_key, default_provider="mistral")
         print(f"-- launching defender (key file {args.defender_key.name}, provider {defender['provider']}) --")
-        proc = ec.launch_defender(round_name, args.defender_key)
+        proc = ec.launch_defender(round_name, args.defender_key, cohort=cohort)
         time.sleep(3)
         transcript = ec.latest_defender_transcript()
         print(f"   defender pid: {proc.pid}, transcript: {transcript.name if transcript else '(not yet created)'}")
@@ -353,9 +363,17 @@ def cmd_collect(args) -> None:
     results = ec.submit_flags(round_name, ec.extract_flags(texts), fixture_set=cohort_fs, evidence_dir=dest)
     for token, outcome in results.items():
         print(f"   {token[:12]}...: {outcome}")
-    submitted = sorted(o for o in results.values() if o in ec.FLAG_OBJECTIVES)
+    submitted = sorted(o for o in results.values() if o in cohort_fs.flag_ids)
     if not results:
         print("   no FLAG{...} tokens found in attacker loot/logs")
+
+    # The classic block/remediate attestation (attest.py) is the legacy-cohort path; the Metasploitable
+    # cohort is scored by the timed-round policy (holds/contains/captures/first-blood) during the run.
+    if state.get("cohort", "legacy-weak") != "legacy-weak":
+        print(f"-- cohort {state.get('cohort')}: scored by the timed-round policy during the run; "
+              f"skipping the legacy block/remediate attestation --")
+        _snapshot_and_finish(dest, round_name, state, submitted)
+        return
 
     print("-- verifying blue claims: attacker probes + defender manifest check (attest.py) --")
     db_path = ec.LAB_KIT_DIR / "private" / "score.db"
@@ -386,6 +404,13 @@ def cmd_collect(args) -> None:
             cmd.append("--apply")
         subprocess.run(cmd, cwd=ec.WORK)
 
+    _snapshot_and_finish(dest, round_name, state, submitted)
+
+
+def _snapshot_and_finish(dest, round_name, state, submitted) -> None:
+    """Snapshot the scoring standing + ledger, write round-info, log, and clear state. Shared by the
+    legacy (attest) and cohort (timed-scoring) collect paths."""
+    db_path = ec.LAB_KIT_DIR / "private" / "score.db"
     print("-- snapshotting scoring standing + ledger --")
     r = subprocess.run([sys.executable, "scoring.py", "report", round_name],
                         cwd=ec.LAB_KIT_DIR, capture_output=True, text=True)
@@ -401,8 +426,8 @@ def cmd_collect(args) -> None:
 
     # Which condition this round was, and who played which side -- for the paper's dataset.
     info = {k: state.get(k) for k in (
-        "round", "mode", "condition", "started_at", "tick_minutes", "ticks_done", "max_minutes", "capped",
-        "attacker_provider", "attacker_model",
+        "round", "mode", "cohort", "condition", "started_at", "tick_minutes", "ticks_done",
+        "max_minutes", "capped", "attacker_provider", "attacker_model",
         "attacker_backend", "attacker_key_file", "defender_provider", "defender_model", "defender_key_file")}
     info["key_files"] = "names only; keys are never archived"
     for k in ("attacker_key_file", "defender_key_file"):
@@ -411,9 +436,6 @@ def cmd_collect(args) -> None:
 
     ec.log_event(f"engagement.py collect: round `{round_name}` ({state.get('mode', 'both')}) archived to "
                  f"`{dest.name}`; submitted flags: {submitted or 'none'}.")
-    # The round's report now exists on disk -- clear state so it isn't re-collected by a later
-    # stray `--follow` poll, and so `status` on an idle session says so plainly instead of
-    # pointing at an already-archived round.
     ec.STATE_FILE.unlink(missing_ok=True)
     print(f"=== Done. Archive: {dest} ===")
 

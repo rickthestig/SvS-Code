@@ -36,10 +36,10 @@ class Ledger:
         if not row or time.time() >= row[0]:
             raise ValueError('Unknown or expired round')
 
-    def create(self, rnd, seconds=1800):
+    def create(self, rnd, seconds=1800, objectives=None):
         if not rnd or not 1 <= seconds <= 86400:
             raise ValueError('Invalid round or duration')
-        tokens = {c: 'FLAG{' + secrets.token_urlsafe(32) + '}' for c in (*INITIAL, 'root')}
+        tokens = {c: 'FLAG{' + secrets.token_urlsafe(32) + '}' for c in (objectives or (*INITIAL, 'root'))}
         with self.db:
             self.db.execute('INSERT INTO rounds VALUES (?,?)', (rnd,time.time()+seconds))
             self.db.executemany('INSERT INTO flags VALUES (?,?,?)',
