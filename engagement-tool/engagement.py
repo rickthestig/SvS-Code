@@ -101,6 +101,7 @@ def cmd_start(args) -> None:
     ec.save_state(
         round=round_name,
         mode=mode,
+        cohort=getattr(args, "cohort", "legacy-weak"),
         condition=getattr(args, "condition", None),
         attacker_key_file=str(args.attacker_key) if attacker["backend"] else None,
         attacker_backend=attacker["backend"],
@@ -219,7 +220,8 @@ def cmd_status(args) -> None:
                 tick = (state.get("ticks_done") or 0) + 1
                 print(f"-- interval {tick}: re-issuing flags and checking every vector --")
                 try:
-                    ev = ec.run_tick(state["round"], tick, ec.TEST_RUN_DIR / f"ticks-{state['round']}")
+                    ev = ec.run_tick(state["round"], tick, ec.TEST_RUN_DIR / f"ticks-{state['round']}",
+                                     fixture_set=ec.load_fixture_set(state.get("cohort", "legacy-weak")))
                     print(f"   placed={ev['flag_placement'].get('placed')} held={ev['blue_hold']} "
                           f"contained={ev['blue_contain']} healthy={ev['healthy']}")
                 except Exception as e:  # noqa: BLE001 -- log it, keep the round going
@@ -347,7 +349,8 @@ def cmd_collect(args) -> None:
                 for member in tf.getmembers():
                     if member.isfile() and member.size <= 5_000_000:
                         texts.append(tf.extractfile(member).read().decode(errors="replace"))
-    results = ec.submit_flags(round_name, ec.extract_flags(texts))
+    cohort_fs = ec.load_fixture_set(state.get("cohort", "legacy-weak"))
+    results = ec.submit_flags(round_name, ec.extract_flags(texts), fixture_set=cohort_fs, evidence_dir=dest)
     for token, outcome in results.items():
         print(f"   {token[:12]}...: {outcome}")
     submitted = sorted(o for o in results.values() if o in ec.FLAG_OBJECTIVES)
@@ -550,7 +553,7 @@ def cmd_experiment(args) -> None:
         cmd_start(argparse.Namespace(
             round=round_name, reuse_round=False, skip_target_reset=False, baseline_probe=False,
             follow=True, apply_attest=args.apply_attest, model=args.model, mode=s["mode"],
-            tick_minutes=args.tick_minutes, max_minutes=args.max_minutes,
+            tick_minutes=args.tick_minutes, max_minutes=args.max_minutes, cohort=args.cohort,
             condition=s["condition"],
             attacker_key=s["attacker_key"] or ec.ATTACKER_KEY_FILE,
             defender_key=s["defender_key"] or ec.DEFENDER_KEY_FILE))
@@ -582,6 +585,8 @@ def main() -> None:
     p_start.add_argument("--apply-attest", action="store_true",
                           help="With --follow: write verified blue awards to the ledger (default: dry run).")
     p_start.add_argument("--model", default="opus", help="Attacker's Claude Code model alias (default: opus).")
+    p_start.add_argument("--cohort", default="legacy-weak",
+                         help="Fixture set / target cohort in fixtures/ (default legacy-weak; e.g. metasploitable3-linux).")
     p_start.add_argument("--max-minutes", type=float, default=0,
                          help="Time cap: stop both agents after N minutes so each side gets equal time "
                               "(enforced inside --follow / status --watch). 0 = no cap.")
@@ -605,6 +610,7 @@ def main() -> None:
     p_exp.add_argument("--model", default="opus", help="Claude Code model alias for an Anthropic attacker.")
     p_exp.add_argument("--tick-minutes", type=float, default=4, help="Timed-round interval for every round (default 4; 0 = off).")
     p_exp.add_argument("--max-minutes", type=float, default=60, help="Time cap for every round (default 60; 0 = none).")
+    p_exp.add_argument("--cohort", default="legacy-weak", help="Fixture set / target cohort (default legacy-weak).")
     p_exp.set_defaults(func=cmd_experiment)
 
     p_status = sub.add_parser("status", help="Show both agents' current status.")
