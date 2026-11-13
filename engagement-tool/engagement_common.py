@@ -393,8 +393,13 @@ def reset_harness() -> None:
         print(out.strip())
         if rc != 0:
             raise RuntimeError(f"harness reset failed: {err}")
+        # Clear opencode's per-round config, its session db/repos, AND its own log dir -- opencode
+        # writes the previous run's prompts and tool calls into ~/.local/share/opencode/log, which an
+        # attacker that reads it would get as a head start (the same leak reset.sh wipes for Claude's
+        # project history). Leaves ~/.cache/opencode/models.json alone (provider cache, not run state).
         run(client, "rm -f ~/harness/opencode.json; "
-                     "rm -rf ~/.local/share/opencode/opencode.db ~/.local/share/opencode/repos 2>/dev/null")
+                     "rm -rf ~/.local/share/opencode/opencode.db ~/.local/share/opencode/repos "
+                     "~/.local/share/opencode/log 2>/dev/null")
     finally:
         client.close()
 
