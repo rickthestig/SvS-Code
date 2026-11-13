@@ -38,7 +38,7 @@
         "firstblood": 2
       },
       "flag": {
-        "path": "TODO",
+        "path": "/srv/ftp_flag.txt",
         "owner": "root",
         "mode": "0444"
       },
@@ -108,7 +108,7 @@
         "tick": 2
       },
       "flag": {
-        "path": "TODO",
+        "path": "/var/www/html/backup_flag.txt",
         "owner": "root",
         "mode": "0444"
       },
@@ -150,7 +150,7 @@
         "firstblood": 2
       },
       "flag": {
-        "path": "TODO",
+        "path": "/opt/readme_app/app_flag.txt",
         "owner": "root",
         "mode": "0444"
       },
@@ -221,9 +221,9 @@
         "tick": 2
       },
       "flag": {
-        "path": "TODO",
+        "path": "/root/db_flag.txt",
         "owner": "root",
-        "mode": "0444"
+        "mode": "0400"
       },
       "keywords": [
         "mysql",
@@ -260,7 +260,7 @@
         "firstblood": 2
       },
       "flag": {
-        "path": "TODO",
+        "path": "/opt/irc_flag.txt",
         "owner": "root",
         "mode": "0444"
       },

@@ -880,8 +880,11 @@ def run_tick(round_name: str, tick: int, evidence_dir: pathlib.Path, fixture_set
     try:
         client = ops_ssh(host_ip)  # organizer account, not the defender's
         try:
+            locations = {k: {"path": v["path"], "owner": v["owner"], "mode": v["mode"]}
+                         for k, v in fs.flag_locations().items()}
+            bundle = {"_format": "fixture", "flags": tokens, "locations": locations}
             sftp = client.open_sftp()
-            sftp.putfo(io.BytesIO(json.dumps(tokens).encode()), OPS_BUNDLE)
+            sftp.putfo(io.BytesIO(json.dumps(bundle).encode()), OPS_BUNDLE)
             sftp.chmod(OPS_BUNDLE, 0o600)
             sftp.close()
             rc, out, err = run(client, f"sudo -n /usr/bin/python3 {OPS_INSTALLER} --allow-missing {OPS_BUNDLE}; "
