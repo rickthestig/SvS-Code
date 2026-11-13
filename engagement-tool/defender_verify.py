@@ -125,11 +125,23 @@ def chk_user_locked(c, s):
     return bool(re.search(rf"^{re.escape(user)}\s+L", out.strip())), out.strip()
 
 
+def chk_db_cred_rejected(c, s):
+    """Fixed iff a documented weak DB credential no longer authenticates (checked on-host, read-only).
+    Operator-only (the credential lives in verification_plan.json, never shown to the defender)."""
+    user = _safe(s["user"], "user")
+    pw = _safe(s.get("password", ""), "password")
+    host = _safe(s.get("host", "127.0.0.1"), "host")
+    cmd = (f"mysql -h{host} -u{shlex.quote(user)} -p{shlex.quote(pw)} -N -e 'SELECT 1' 2>&1 | tail -1")
+    rc, out, _ = _ro_run(c, cmd)
+    rejected = "Access denied" in out or "ERROR 1045" in out
+    return rejected, f"weak cred {'rejected' if rejected else 'STILL WORKS'}: {out.strip()[-80:]}"
+
+
 STATE_CHECKS = {
     "sshd_config": chk_sshd_config, "path_absent": chk_path_absent, "no_setuid": chk_no_setuid,
     "no_suid_anywhere": chk_no_suid_anywhere, "not_writable_chain": chk_not_writable_chain,
     "sudo_denied": chk_sudo_denied, "smb_param": chk_smb_param, "http_status": chk_http_status,
-    "user_locked": chk_user_locked,
+    "user_locked": chk_user_locked, "db_cred_rejected": chk_db_cred_rejected,
 }
 
 

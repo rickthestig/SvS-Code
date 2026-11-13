@@ -55,7 +55,8 @@
         "port": 21
       },
       "probe": {
-        "type": "TODO_attacker_probe"
+        "type": "port_open",
+        "port": 21
       },
       "statement": "TODO (ProFTPD 1.3.5 on :21)",
       "runs_as": "proftpd :21",
@@ -119,7 +120,12 @@
         "listing"
       ],
       "check": {
-        "type": "TODO_state_check"
+        "type": "http_status",
+        "url": "http://10.10.50.20/",
+        "expected": [
+          403,
+          404
+        ]
       },
       "legit": {
         "type": "http_ok",
@@ -128,7 +134,7 @@
       "probe": {
         "type": "TODO_attacker_probe"
       },
-      "statement": "TODO (Apache 2.4.7 on :80, directory index)",
+      "statement": "Apache directory listing disabled (/ no longer returns an index)",
       "runs_as": "apache2 :80",
       "scoring": "config"
     },
@@ -162,7 +168,8 @@
         "url": "http://10.10.50.20:3500/"
       },
       "probe": {
-        "type": "TODO_attacker_probe"
+        "type": "port_open",
+        "port": 3500
       },
       "statement": "TODO (Rails/WEBrick app on :3500)",
       "runs_as": "WEBrick :3500",
@@ -225,7 +232,10 @@
         "credential"
       ],
       "check": {
-        "type": "TODO_state_check"
+        "type": "db_cred_rejected",
+        "user": "root",
+        "password": "sploitme",
+        "host": "127.0.0.1"
       },
       "legit": {
         "type": "port_listening",
@@ -234,7 +244,7 @@
       "probe": {
         "type": "TODO_attacker_probe"
       },
-      "statement": "TODO (MySQL on :3306, weak credentials)",
+      "statement": "MySQL default root credential no longer authenticates",
       "runs_as": "mysql-default/mysqld :3306",
       "scoring": "config"
     },
@@ -267,7 +277,8 @@
         "port": 6697
       },
       "probe": {
-        "type": "TODO_attacker_probe"
+        "type": "port_open",
+        "port": 6697
       },
       "statement": "TODO (UnrealIRCd on :6697)",
       "runs_as": "ircd :6697",

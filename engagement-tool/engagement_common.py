@@ -862,11 +862,11 @@ def run_tick(round_name: str, tick: int, evidence_dir: pathlib.Path, fixture_set
     the interval through the policy (config holds, exploit contains, first-blood deferred to collect)
     and record a health sample. Returns the evidence dict it saved."""
     import io
-    import attacker_verify as av
     sys.path.insert(0, str(LAB_KIT_DIR))
     from scoring import Ledger
 
     fs = fixture_set or load_fixture_set()
+    host_ip = next(iter(fs.hosts.values()))["ip"]  # single-host cohorts
     evidence_dir.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(LAB_KIT_DIR / "private" / "score.db")
     try:
@@ -878,7 +878,7 @@ def run_tick(round_name: str, tick: int, evidence_dir: pathlib.Path, fixture_set
 
     placement = {"error": None}
     try:
-        client = ops_ssh(NODES["weak"][1])  # organizer account, not the defender's
+        client = ops_ssh(host_ip)  # organizer account, not the defender's
         try:
             sftp = client.open_sftp()
             sftp.putfo(io.BytesIO(json.dumps(tokens).encode()), OPS_BUNDLE)
@@ -892,26 +892,50 @@ def run_tick(round_name: str, tick: int, evidence_dir: pathlib.Path, fixture_set
     except Exception as e:  # noqa: BLE001 -- a down host means no flags placed this interval
         placement["error"] = str(e)
 
-    probes = av.probe_all(f"tick-{tick}")
-    try:
-        legit = legit_checks()
-    except Exception as e:  # noqa: BLE001
-        legit = {"error": str(e)}
-
-    # Score this interval through the policy, driven by the fixture set (config vs exploit split,
-    # per-fixture weights, and blue's declared takedown). Legacy = all config, so it reduces to holds.
     sys.path.insert(0, str(FIXTURES_DIR))
     import scoring_policy as sp
+    import defender_verify as dv
     kinds = fs.kinds_for_blue()
-    objs = probes.get("objectives", {})
-    probe_reachable = {o: (r.get("status") != "closed") for o, r in objs.items()}  # fixed iff 'closed'
-    legit_ok = {} if "error" in legit else {o: v["ok"] for o, v in legit.items()}
-    declared = sp.valid_takedown(read_declared_takedown(NODES["weak"][1]), kinds["exploit"])
-    awards = sp.tick_awards(kinds, probe_reachable, legit_ok, captures=set(),
+
+    # Config fixtures: the defender's authoritative host-state check (fixed?) + legitimate-service probe.
+    config_plan = {"objectives": {fid: {"check": fs.by_id(fid)["check"], "legit": fs.by_id(fid)["legit"],
+                                        "keywords": fs.by_id(fid).get("keywords", [fid])}
+                                  for fid in kinds["config"]}}
+    state_ok, legit_ok, check_detail = {}, {}, {}
+    if config_plan["objectives"]:
+        tgt = target_ssh(host_ip)
+        try:
+            res = dv.evaluate(tgt, {"claims": []}, config_plan)
+        finally:
+            tgt.close()
+        for r in res["results"]:
+            state_ok[r["objective"]] = r.get("state_ok", False)
+            legit_ok[r["objective"]] = r.get("legit_ok", False)
+            check_detail[r["objective"]] = {"state": r.get("state_observed"), "legit": r.get("legit_observed")}
+
+    # Exploit fixtures: attacker-side reachability (a declared, now-unreachable service is contained).
+    reachable = {}
+    if kinds["exploit"]:
+        k = kali_ssh()
+        try:
+            for fid in kinds["exploit"]:
+                port = int(fs.by_id(fid)["probe"]["port"])
+                _, o, _ = run(k, f"timeout 4 bash -c 'echo > /dev/tcp/{host_ip}/{port}' 2>/dev/null "
+                                 f"&& echo OPEN || echo CLOSED")
+                reachable[fid] = "OPEN" in o
+        finally:
+            k.close()
+
+    # policy input: probe[id] = attacker can reach it. config: reachable iff not fixed; exploit: port open.
+    probe = {fid: (not state_ok.get(fid, False)) for fid in kinds["config"]}
+    probe.update(reachable)
+    declared = sp.valid_takedown(read_declared_takedown(host_ip), kinds["exploit"])
+    awards = sp.tick_awards(kinds, probe, legit_ok, captures=set(),
                             declared_takedown=declared, firstblood_seen=set())  # captures scored at collect
 
-    evidence = {"round": round_name, "tick": tick, "flag_placement": placement,
-                "probes": probes, "legit": legit, "declared_takedown": declared,
+    evidence = {"round": round_name, "tick": tick, "host": host_ip, "flag_placement": placement,
+                "config_state": state_ok, "config_legit": legit_ok, "check_detail": check_detail,
+                "exploit_reachable": reachable, "declared_takedown": declared,
                 "blue_hold": awards["blue_hold"], "blue_contain": awards["blue_contain"],
                 "healthy": awards["healthy"]}
     ev_path = evidence_dir / f"tick-{tick:02d}.json"
