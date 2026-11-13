@@ -372,6 +372,9 @@ def cmd_collect(args) -> None:
     if state.get("cohort", "legacy-weak") != "legacy-weak":
         print(f"-- cohort {state.get('cohort')}: scored by the timed-round policy during the run; "
               f"skipping the legacy block/remediate attestation --")
+        # Archive the defender's manifest so the claimed-vs-verified gap (its claims vs the per-interval
+        # tick evidence of what actually held) is auditable in the run folder.
+        _archive_defender_manifest(dest, state.get("cohort", "legacy-weak"))
         _snapshot_and_finish(dest, round_name, state, submitted)
         return
 
@@ -405,6 +408,26 @@ def cmd_collect(args) -> None:
         subprocess.run(cmd, cwd=ec.WORK)
 
     _snapshot_and_finish(dest, round_name, state, submitted)
+
+
+def _archive_defender_manifest(dest, cohort) -> None:
+    """Pull the defender's remediation manifest off the cohort host into the archive (the timed-cohort
+    collect path doesn't go through the legacy attestation that pulled it)."""
+    host_ip = ec.cohort_host_ip(ec.load_fixture_set(cohort))
+    try:
+        tc = ec.target_ssh(host_ip)
+        try:
+            sftp = tc.open_sftp()
+            try:
+                sftp.get("/home/defender/remediation_manifest.json", str(dest / "remediation_manifest.json"))
+                print("   defender manifest archived")
+            except FileNotFoundError:
+                print("   defender wrote no /home/defender/remediation_manifest.json")
+            sftp.close()
+        finally:
+            tc.close()
+    except Exception as e:  # noqa: BLE001 -- a down host must not stop the archive
+        print(f"   could not reach {host_ip} to pull the manifest ({e})")
 
 
 def _correct_tick_maxima(report_json: str, cohort: str) -> dict:
