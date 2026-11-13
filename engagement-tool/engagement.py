@@ -484,6 +484,9 @@ def cmd_check(args) -> None:
     through a multi-minute run because something basic (GNS3 VM down, Mistral key missing) was
     wrong from the start."""
     ok = True
+    cohort = getattr(args, "cohort", "legacy-weak")
+    cohort_cfg = ec.COHORTS[cohort]
+    print(f"=== preflight for cohort {cohort} ===")
 
     def report(label: str, passed: bool, detail: str = "") -> None:
         nonlocal ok
@@ -505,12 +508,34 @@ def cmd_check(args) -> None:
     except Exception as e:  # noqa: BLE001
         report("Kali reachable (via GNS3 VM pivot)", False, str(e))
 
-    for name, (node_id, ip) in ec.NODES.items():
+    # This cohort's target node(s): legacy = weak/iot; ms3 = the single Metasploitable node.
+    nodes = ec.NODES if cohort == "legacy-weak" else {"ms3": (ec.MS3_NODE, ec.MS3_IP)}
+    for name, (node_id, ip) in nodes.items():
         try:
             status = ec.node_status(node_id)
             report(f"target '{name}' node queryable", True, f"status={status}")
         except Exception as e:  # noqa: BLE001
             report(f"target '{name}' node queryable", False, str(e))
+
+    # Reset readiness: the frozen baseline the reset restores from must exist and verify on the GNS3 VM.
+    if cohort == "legacy-weak":
+        baseline_dirs = {"weak": "20261009-ready/weak", "iot": "20261009-ready/iot"}
+    else:
+        baseline_dirs = {"ms3": "20261112-ms3/ms3"}
+    try:
+        vm = ec.connect()
+        try:
+            for name, rel in baseline_dirs.items():
+                b = f"/home/gns3/codex-tournament/baselines/{rel}"
+                _, out, _ = ec.run(vm, f"test -f {b}/hda_disk.qcow2 && test -f {b}/SHA256SUMS "
+                                       f"&& (cd {b} && sha256sum -c SHA256SUMS >/dev/null 2>&1 && echo VERIFIED || echo HASH_FAIL) "
+                                       f"|| echo MISSING")
+                r = out.strip()
+                report(f"baseline for '{name}' present + verifies (reset source)", r == "VERIFIED", r)
+        finally:
+            vm.close()
+    except Exception as e:  # noqa: BLE001
+        report("baseline check", False, str(e))
 
     try:
         d = ec.read_key_file(ec.DEFENDER_KEY_FILE, default_provider="mistral")
@@ -544,9 +569,10 @@ def cmd_check(args) -> None:
         ("defender_agent.py", ec.DEFENDER_SCRIPT),
         ("scoring.py", ec.LAB_KIT_DIR / "scoring.py"),
         ("install_flags.py", ec.LAB_KIT_DIR / "install_flags.py"),
-        ("AGENT_PENTEST_SCOPE.md", ec.AGENT_SCOPE_DOC),
-        ("DEFENDER_SCOPE.md", ec.DEFENDER_SCOPE_DOC),
+        (f"attacker scope ({cohort_cfg['attacker_scope'].name})", cohort_cfg["attacker_scope"]),
+        (f"defender scope ({cohort_cfg['defender_scope'].name})", cohort_cfg["defender_scope"]),
         ("thesis_blue SSH key", pathlib.Path(ec.THESIS_BLUE_KEY)),
+        (f"fixture set ({cohort}.json)", ec.FIXTURES_DIR / f"{cohort}.json"),
     ]:
         report(f"{label} present", path.is_file(), str(path))
 
@@ -692,7 +718,8 @@ def main() -> None:
                            help="Write verified blue awards to the ledger (default: dry run, referee reviews first).")
     p_collect.set_defaults(func=cmd_collect)
 
-    p_check = sub.add_parser("check", help="Verify GNS3 VM/Kali/targets/keys are all reachable before `start`.")
+    p_check = sub.add_parser("check", help="Verify GNS3 VM/Kali/targets/baseline/keys are ready before `start`.")
+    p_check.add_argument("--cohort", default="legacy-weak", help="Cohort to preflight (default legacy-weak).")
     p_check.set_defaults(func=cmd_check)
 
     args = parser.parse_args()
