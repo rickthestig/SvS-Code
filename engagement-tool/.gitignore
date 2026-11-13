@@ -13,3 +13,6 @@ target-known-hosts
 __pycache__/
 *.pyc
 defender-stderr.log
+
+# Per-agent key files for `engagement.py experiment`
+keys/

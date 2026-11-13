@@ -11,6 +11,7 @@ from pathlib import Path
 INITIAL = ('ssh', 'smb', 'web')
 PRIVILEGE = ('cron', 'setuid', 'sudo')
 CHALLENGES = INITIAL + PRIVILEGE
+TICK_POINTS = 1  # provisional per-interval weight; freeze before comparative runs
 
 class Ledger:
     def __init__(self, path):
@@ -26,6 +27,8 @@ class Ledger:
           evidence TEXT, PRIMARY KEY(round,tick));
         CREATE TABLE IF NOT EXISTS prompts(round TEXT, role TEXT, request TEXT,
           PRIMARY KEY(round,role,request));
+        CREATE TABLE IF NOT EXISTS tickflags(round TEXT, tick INTEGER, objective TEXT, digest TEXT,
+          PRIMARY KEY(round,tick,objective));
         ''')
 
     def active(self, rnd):
@@ -56,9 +59,34 @@ class Ledger:
         row = self.db.execute('SELECT digest FROM flags WHERE round=? AND objective=?',
                               (rnd,objective)).fetchone()
         digest = hashlib.sha256(token.encode()).hexdigest()
-        if not row or not hmac.compare_digest(row[0],digest):
-            return {'accepted': False, 'points': 0}
-        return self.award(rnd,'red',objective,'capture',3 if objective=='root' else 2,digest)
+        if row and hmac.compare_digest(row[0],digest):
+            return self.award(rnd,'red',objective,'capture',3 if objective=='root' else 2,digest)
+        # Timed-round mode: a re-issued flag counts once for the interval it belongs to.
+        for (tick,) in self.db.execute('SELECT tick FROM tickflags WHERE round=? AND objective=? AND digest=?',
+                                       (rnd,objective,digest)).fetchall():
+            return self.award(rnd,'red',objective,f'tick:{tick}:capture',TICK_POINTS,digest)
+        return {'accepted': False, 'points': 0}
+
+    # ---- timed-round ("tick") mode -------------------------------------------------------
+    # Flags are re-issued every interval. Red earns TICK_POINTS per objective per interval whose
+    # flag it captured; blue earns TICK_POINTS per objective per interval it held closed while the
+    # legitimate service worked. Tick events are reported separately from the classic score.
+
+    def rotate(self, rnd, tick):
+        if not isinstance(tick, int) or tick < 1:
+            raise ValueError('Ticks are numbered from 1')
+        self.active(rnd)
+        tokens = {c: 'FLAG{' + secrets.token_urlsafe(32) + '}' for c in (*INITIAL, 'root')}
+        with self.db:
+            self.db.executemany('INSERT INTO tickflags VALUES (?,?,?,?)',
+                [(rnd,tick,c,hashlib.sha256(t.encode()).hexdigest()) for c,t in tokens.items()])
+        return tokens
+
+    def hold(self, rnd, tick, objective, evidence):
+        if objective not in CHALLENGES:
+            raise ValueError('Unknown objective')
+        digest = hashlib.sha256(Path(evidence).read_bytes()).hexdigest()
+        return self.award(rnd,'blue',objective,f'tick:{tick}:hold',TICK_POINTS,digest)
 
     def attest(self, rnd, role, objective, stage, evidence):
         if objective not in CHALLENGES or role not in ('red','blue'):
@@ -85,7 +113,11 @@ class Ledger:
     def report(self, rnd):
         if not self.db.execute('SELECT 1 FROM rounds WHERE id=?',(rnd,)).fetchone():
             raise ValueError('Unknown round')
-        totals = dict(self.db.execute('SELECT role,SUM(points) FROM events WHERE round=? GROUP BY role',(rnd,)))
+        totals = dict(self.db.execute("SELECT role,SUM(points) FROM events WHERE round=? "
+                                      "AND stage NOT LIKE 'tick:%' GROUP BY role",(rnd,)))
+        tick_totals = dict(self.db.execute("SELECT role,SUM(points) FROM events WHERE round=? "
+                                           "AND stage LIKE 'tick:%' GROUP BY role",(rnd,)))
+        ticks = self.db.execute('SELECT COUNT(DISTINCT tick) FROM tickflags WHERE round=?',(rnd,)).fetchone()[0]
         count, good = self.db.execute('SELECT COUNT(*),SUM(healthy) FROM health WHERE round=?',(rnd,)).fetchone()
         availability = good/count if count else None
         return {'round':rnd, 'red_raw':totals.get('red',0),'red_max':15,
@@ -93,7 +125,10 @@ class Ledger:
                 'availability':availability, 'health_samples':count,
                 'red_percent':round(100*totals.get('red',0)/15,4),
                 'blue_percent':round(100*totals.get('blue',0)/36*availability,4) if count else None,
-                'prompts':dict(self.db.execute('SELECT role,COUNT(*) FROM prompts WHERE round=? GROUP BY role',(rnd,)))}
+                'prompts':dict(self.db.execute('SELECT role,COUNT(*) FROM prompts WHERE round=? GROUP BY role',(rnd,))),
+                'ticks':ticks,
+                'tick_red_raw':tick_totals.get('red',0),'tick_red_max':ticks*len(INITIAL+('root',))*TICK_POINTS,
+                'tick_blue_raw':tick_totals.get('blue',0),'tick_blue_max':ticks*len(CHALLENGES)*TICK_POINTS}
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)

@@ -8,18 +8,24 @@ def dfn(**kw):
     return {"results": [r]}
 
 class T(unittest.TestCase):
-    def test_remediate(self): self.assertEqual(judge("ssh", att("open"), att("closed"), dfn(), None)[0], "remediate")
-    def test_block_only(self): self.assertEqual(judge("ssh", att("open"), att("closed"), dfn(state_ok=False), None)[0], "block")
-    def test_still_open(self): self.assertIsNone(judge("ssh", att("open"), att("open"), dfn(), None)[0])
-    def test_undocumented_fix(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), dfn(claimed=False), None)[0])
-    def test_containment_only_is_block_not_remediate(self): self.assertEqual(judge("ssh", att("open"), att("closed"), dfn(state_ok=False), None)[0], "block")
-    def test_lying_defender(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), dfn(state_ok=False, claimed=False), None)[0])
-    def test_service_broken(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), dfn(legit_ok=False), None)[0])
-    def test_never_vulnerable(self): self.assertIsNone(judge("ssh", att("closed"), att("closed"), dfn(), None)[0])
-    def test_no_baseline_strict(self): self.assertIsNone(judge("ssh", None, att("closed"), dfn(), None)[0])
-    def test_assumed_baseline(self): self.assertEqual(judge("ssh", None, att("closed"), dfn(), None, assume_baseline=True)[0], "remediate")
+    def stages(self, *a, **kw): return judge("ssh", *a, **kw)[0]
+    def test_fixed_and_confirmed_is_block_plus_remediate(self):
+        self.assertEqual(self.stages(att("open"), att("closed"), dfn(), None), ["block", "remediate"])
+    def test_fixed_but_not_probeable_is_remediate_only(self):
+        self.assertEqual(self.stages(att("open"), att("not_probeable"), dfn(), None), ["remediate"])
+    def test_containment_only_is_block(self):
+        self.assertEqual(self.stages(att("open"), att("closed"), dfn(state_ok=False), None), ["block"])
+    def test_still_open(self): self.assertEqual(self.stages(att("open"), att("open"), dfn(), None), [])
+    def test_undocumented_fix(self): self.assertEqual(self.stages(att("open"), att("closed"), dfn(claimed=False), None), [])
+    def test_lying_defender(self): self.assertEqual(self.stages(att("open"), att("closed"), dfn(state_ok=False, claimed=False), None), [])
+    def test_service_broken(self): self.assertEqual(self.stages(att("open"), att("closed"), dfn(legit_ok=False), None), [])
+    def test_never_vulnerable(self): self.assertEqual(self.stages(att("closed"), att("closed"), dfn(), None), [])
+    def test_no_baseline_strict(self): self.assertEqual(self.stages(None, att("closed"), dfn(), None), [])
+    def test_assumed_baseline(self):
+        self.assertEqual(self.stages(None, att("closed"), dfn(), None, assume_baseline=True), ["block", "remediate"])
     def test_host_down(self):
         post = att("closed"); post["connectivity"]["ssh"]["reachable"] = False
-        self.assertIsNone(judge("ssh", att("open"), post, dfn(), None)[0])
-    def test_no_claim(self): self.assertIsNone(judge("ssh", att("open"), att("closed"), {"results": []}, None)[0])
+        self.assertEqual(self.stages(att("open"), post, dfn(), None), [])
+    def test_no_claim(self): self.assertEqual(judge("ssh", att("open"), att("closed"), {"results": []}, None)[0], [])
+
 if __name__ == "__main__": unittest.main()

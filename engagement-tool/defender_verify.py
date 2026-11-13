@@ -136,9 +136,15 @@ STATE_CHECKS = {
 # ---- legitimate-service probes ----------------------------------------------------------------
 
 def leg_service_active(c, s):
+    """Service is running, on systemd OR Upstart/SysV (Metasploitable 3 is Upstart). Tries
+    `systemctl is-active`; if systemctl isn't there, uses `service <unit> status` and reads its text
+    (Upstart: 'start/running'; SysV init script: 'is running' / 'active')."""
     unit = _safe(s["unit"], "unit")
-    rc, out, _ = _ro_run(c, f"sudo -n systemctl is-active {shlex.quote(unit)}")
-    return out.strip() == "active", f"{unit}: {out.strip()}"
+    rc, out, _ = _ro_run(c, f"command -v systemctl >/dev/null && sudo -n systemctl is-active {shlex.quote(unit)} "
+                            f"|| sudo -n service {shlex.quote(unit)} status 2>&1")
+    text = out.strip()
+    ok = text == "active" or "start/running" in text or "is running" in text or bool(re.search(r"\bactive\b", text))
+    return ok, f"{unit}: {text[:120]}"
 
 
 def leg_http_ok(c, s):

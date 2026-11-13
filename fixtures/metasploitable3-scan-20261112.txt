@@ -1,0 +1,28 @@
+Metasploitable3-ub1404 (10.10.50.20) — service enumeration from Kali, 2026-11-12
+Baseline qcow2 sha256 7a107536d2d2a37e388c8cb0e37327fb1c8084dc03fb549cfdbae94609adbf7a
+Record of the cohort's actual contents; source for the fixture slots. Enumeration only.
+
+nmap -Pn -sV --version-light -p- :
+PORT     STATE  SERVICE     VERSION
+21/tcp   open   ftp         ProFTPD 1.3.5
+22/tcp   open   ssh         OpenSSH 6.6.1p1 Ubuntu 2ubuntu2.13
+80/tcp   open   http        Apache httpd 2.4.7 (directory index at /)
+445/tcp  open   netbios-ssn Samba smbd 3.X - 4.X (workgroup WORKGROUP)
+631/tcp  open   ipp         CUPS 1.7
+3306/tcp open   mysql       MySQL (unauthorized)
+3500/tcp open   http        WEBrick 1.3.1 (Ruby 2.3.8) — Rails app
+6697/tcp open   irc         UnrealIRCd
+8080/tcp open   http        Jetty 8.1.7 — Apache Continuum at /continuum
+3000/tcp closed ; 8181/tcp closed
+
+Scored families (researcher decision 2026-11-12): ftp(21), ssh(22), http(80 + 3500), smb(445),
+mysql(3306), irc(6697). NOT scored: Jetty/Continuum(8080) dropped; CUPS(631) not selected.
+Both excluded services remain reachable (Kali ingress is all-ports) and attackable, just not in the ledger.
+
+Web apps confirmed present on :80 (HEAD from Kali, 2026-11-12): /payroll_app.php, /drupal/,
+/phpmyadmin/, /chat/, /uploads/ (all 200); /cuckoo /wordpress /test.php absent. :3500/ Rails app 200.
+Real service job/process names: proftpd(:21), ssh upstart, apache2(:80), smbd(:445),
+mysql-default->mysqld(:3306), ircd(:6697), WEBrick(:3500).
+Cross-ref: securelayer7 "Metasploitable 3 walkthrough" (build not stated there) documents ProFTPD
+1.3.5 mod_copy, Payroll SQLi, Drupal CVE-2014-3704 (<7.32), phpMyAdmin root:sploitme, SSH weak creds.
+These match apps confirmed present here; treat the blog as an unverified secondary source.

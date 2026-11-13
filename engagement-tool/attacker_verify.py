@@ -15,9 +15,11 @@ result only counts toward credit if the pre run shows it was `open`, so a defend
 rewarded for "fixing" something that was never exposed.
 
 Probes only test access that the lab's own fixtures expose; they run no exploits and change nothing.
-cron / setuid / sudo are local-privilege issues and can only be probed from the attacker side if
-you supply a low-privilege lab login in probes.json ("lowpriv"); otherwise they report
-not_probeable and are judged from defender-side state checks only.
+cron / setuid / sudo are local-privilege issues: what matters is what the low-privilege user can
+do once on the box. By default they are probed ON the target, running each check as that user
+(`sudo -u student` from the operator's session) -- so they still work after the defender changes
+or locks the student password. Supplying "lowpriv" credentials in probes.json probes them from
+Kali over SSH instead. If neither works they report not_probeable.
 
 Usage:
     python attacker_verify.py --label pre|post --out attacker-<label>.json [--probes probes.json]
@@ -38,7 +40,9 @@ DEFAULT_PROBES = {
     "ports": {"ssh": 22, "smb": 445, "web": 80},
     "smb_share": "public",
     "web_paths": ["/backups/device-config.txt"],
-    # Optional low-privilege lab login for local-privilege probes (cron/setuid/sudo). Example:
+    # The low-privilege fixture account the cron/setuid/sudo probes run as (on-host by default).
+    "lowpriv_user": "student",
+    # Optional: probe from Kali over SSH with a password instead, e.g.
     # "lowpriv": {"user": "student", "password": "<lab fixture password>"}
 }
 
@@ -90,24 +94,44 @@ def probe_web(client, ip, cfg):
 
 
 def _lowpriv(client, ip, cfg, remote_cmd):
+    """Run remote_cmd as the low-privilege user; None if that isn't possible."""
     lp = cfg.get("lowpriv")
-    if not lp:
+    if lp:
+        cmd = (f"SSHPASS={shlex.quote(lp['password'])} sshpass -e ssh -o StrictHostKeyChecking=no "
+               f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 {shlex.quote(lp['user'])}@{ip} "
+               f"{shlex.quote(remote_cmd)} 2>&1 | tail -15")
+        return kali(client, cmd, timeout=60)[1]
+    host = cfg.get("_host")
+    if host is None:
         return None
-    cmd = (f"SSHPASS={shlex.quote(lp['password'])} sshpass -e ssh -o StrictHostKeyChecking=no "
-           f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 {shlex.quote(lp['user'])}@{ip} "
-           f"{shlex.quote(remote_cmd)} 2>&1 | tail -15")
-    return kali(client, cmd, timeout=60)[1]
+    user = shlex.quote(cfg.get("lowpriv_user", "student"))
+    return kali(host, f"sudo -n -u {user} -- bash -c {shlex.quote(remote_cmd)} 2>&1 | tail -15", timeout=60)[1]
 
 
 def _need_lowpriv(out):
     return out is None or "Permission denied" in out or "sshpass" in out and "not found" in out
 
 
+def open_host_probe(cfg):
+    """Operator session on the target that can act as the low-privilege user, or None."""
+    import engagement_common as ec
+    try:
+        host = ec.target_ssh(cfg["target_ip"])
+    except Exception:  # noqa: BLE001
+        return None
+    user = shlex.quote(cfg.get("lowpriv_user", "student"))
+    _, out, _ = ec.run(host, f"sudo -n -u {user} -- true && echo AS_USER_OK")
+    if "AS_USER_OK" not in out:
+        host.close()
+        return None
+    return host
+
+
 def probe_sudo(client, ip, cfg):
     out = _lowpriv(client, ip, cfg, "sudo -n -l")
     if _need_lowpriv(out):
         return {"status": "not_probeable", "observed": "no working lowpriv login in probes.json"}
-    bad = bool(re.search(r"NOPASSWD|\(ALL(:ALL)?\)\s+ALL", out))
+    bad = bool(re.search(r"NOPASSWD|\(ALL(\s*:\s*ALL)?\)\s+ALL", out))
     return {"status": "open" if bad else "closed", "observed": out.strip()[-300:]}
 
 
@@ -132,6 +156,30 @@ PROBES = {"ssh": probe_ssh, "smb": probe_smb, "web": probe_web,
           "cron": probe_cron, "setuid": probe_setuid, "sudo": probe_sudo}
 
 
+def probe_all(label: str, overrides: dict | None = None) -> dict:
+    """Connectivity + every objective probe; returns the report dict (also used per interval in
+    timed rounds)."""
+    cfg = dict(DEFAULT_PROBES)
+    cfg.update(overrides or {})
+    import engagement_common as ec
+    client = ec.kali_ssh()
+    cfg["_host"] = None if cfg.get("lowpriv") else open_host_probe(cfg)
+    try:
+        conn = connectivity(client, cfg["target_ip"], cfg["ports"])
+        results = {obj: fn(client, cfg["target_ip"], cfg) for obj, fn in PROBES.items()}
+    finally:
+        client.close()
+        if cfg["_host"] is not None:
+            cfg["_host"].close()
+    local_vantage = ("kali-ssh-as-" + cfg["lowpriv"]["user"] if cfg.get("lowpriv")
+                     else f"on-host-as-{cfg.get('lowpriv_user', 'student')}")
+    for obj in ("cron", "setuid", "sudo"):
+        results[obj]["vantage"] = local_vantage
+    return {"label": label, "target_ip": cfg["target_ip"], "vantage": "kali (network probes)",
+            "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "connectivity": conn, "objectives": results}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--label", required=True, choices=["pre", "post"])
@@ -139,22 +187,10 @@ def main():
     ap.add_argument("--probes", type=pathlib.Path, help="JSON overriding DEFAULT_PROBES")
     a = ap.parse_args()
 
-    cfg = dict(DEFAULT_PROBES)
-    if a.probes:
-        cfg.update(json.loads(a.probes.read_text(encoding="utf-8")))
-
-    import engagement_common as ec
-    client = ec.kali_ssh()
-    try:
-        conn = connectivity(client, cfg["target_ip"], cfg["ports"])
-        results = {obj: fn(client, cfg["target_ip"], cfg) for obj, fn in PROBES.items()}
-    finally:
-        client.close()
-
-    report = {"label": a.label, "target_ip": cfg["target_ip"], "vantage": "kali",
-              "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-              "connectivity": conn, "objectives": results}
+    overrides = json.loads(a.probes.read_text(encoding="utf-8")) if a.probes else None
+    report = probe_all(a.label, overrides)
     a.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    conn, results = report["connectivity"], report["objectives"]
     print("connectivity:", {k: ("up" if v["reachable"] else "DOWN") for k, v in conn.items()})
     for obj, r in results.items():
         print(f"  {obj:7s} {r['status']:14s} {str(r['observed'])[:110]}")

@@ -19,7 +19,7 @@ def run(c, cmd, timeout=60):
 def upload(c, local, remote):
  with c.open_sftp() as s:s.put(str(local),remote)
 def api(method,path,body=None):
- cfg=configparser.ConfigParser();cfg.read(pathlib.Path.home()/'AppData/Roaming/GNS3/2.2/gns3_server.ini')
+ cfg=configparser.ConfigParser(interpolation=None);cfg.read(pathlib.Path.home()/'AppData/Roaming/GNS3/2.2/gns3_server.ini')
  sec=cfg['Server'];r=requests.request(method,'http://localhost:3080/v2/'+path,auth=(sec['user'],sec['password']),json=body,timeout=60);r.raise_for_status()
  return r.json() if r.content else None
 if __name__=='__main__':

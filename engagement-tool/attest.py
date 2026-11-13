@@ -2,9 +2,7 @@
 """
 Combined blue attestation: awards `block` / `remediate` only when BOTH sides independently agree.
 
-Replaces the old attacker-report keyword matching (auto_attest.py), which could award `block` from
-a phrase like "blocked" in prose and never looked at the defender's host. Evidence now comes from
-three machine-checked reports:
+Evidence comes only from machine-checked reports, never from either agent's prose:
 
   attacker_verify.py --label pre   (before defense: objective was `open`)      [--pre]
   attacker_verify.py --label post  (after defense:  objective is `closed`)     [--post]
@@ -18,12 +16,15 @@ Rules, per objective:
             If --pre / --defender-pre evidence is given it is used instead; --strict-baseline
             demands such evidence. Never rewards patching a flaw
             that was absent.
-  block     baseline AND attacker `post` = closed AND the defender manifest has a claim for the
-            objective that is verified (state check passed + legitimate-service probe passed) AND
-            the target was not simply down (post connectivity shows other services still up).
-  remediate block's conditions AND every manifest claim for that objective verified AND at least
-            one claim declared with stage "remediate". (Per RESEARCH.md, block-only containment
-            earns 2; remediate needs the underlying flaw fixed.)
+  common    baseline AND the defender documented the vector in its manifest AND the legitimate
+            service still works AND the attacker can't still reach it AND the target isn't simply
+            down (some service still answers from Kali).
+  block     common AND attacker `post` probe = closed (independently verified prevention).
+  remediate common AND the operator's state check confirms the underlying flaw is fixed.
+            Stages are additive (RESEARCH.md): fixed + attacker-confirmed closed earns block AND
+            remediate (2 + 3). cron/setuid/sudo are probed on-host as the low-privilege user;
+            if that probe is not_probeable they can earn remediate only. Containment without a
+            real fix earns block only.
   identify  Never automated -- judgment call, left to the human referee.
 
 Dry run by default. --apply calls scoring.py attest with a generated evidence file that embeds the
@@ -49,7 +50,7 @@ def load(p):
 
 
 def judge(obj, pre, post, defender, defender_pre, assume_baseline=False):
-    """Return (stage_awarded | None, [reasons]). Pure function -- unit-testable without any VM.
+    """Return ([stages awarded], [reasons]). Pure function -- unit-testable without any VM.
 
     `defender` is defender_verify.py's report: per objective, the operator's own checks
     (state_ok = underlying fix in place, legit_ok = legitimate service works) plus `claimed`
@@ -57,7 +58,7 @@ def judge(obj, pre, post, defender, defender_pre, assume_baseline=False):
     why = []
     r = next((x for x in (defender or {}).get("results", []) if x.get("objective") == obj), None)
     if r is None:
-        return None, ["objective not in defender verification report"]
+        return [], ["objective not in defender verification report"]
 
     # --- baseline: was there actually something to fix? ---
     was_vuln = None
@@ -73,15 +74,15 @@ def judge(obj, pre, post, defender, defender_pre, assume_baseline=False):
         was_vuln = True
         why.append("baseline: assumed vulnerable (rigid init script; see verification_plan.json)")
     if was_vuln is None:
-        return None, why + ["no baseline evidence (need attacker --pre or --defender-pre); not awarding"]
+        return [], why + ["no baseline evidence (need attacker --pre or --defender-pre); not awarding"]
     if not was_vuln:
-        return None, why + ["objective was not vulnerable at baseline; nothing to credit"]
+        return [], why + ["objective was not vulnerable at baseline; nothing to credit"]
 
     # --- target must not simply be down ---
     if post:
         conn = post.get("connectivity", {})
         if conn and not any(v["reachable"] for v in conn.values()):
-            return None, why + ["target unreachable on every service post-defense (down, not fixed)"]
+            return [], why + ["target unreachable on every service post-defense (down, not fixed)"]
 
     post_status = (post or {}).get("objectives", {}).get(obj, {}).get("status", "not_probeable")
     why.append(f"attacker post probe: {post_status}")
@@ -89,17 +90,25 @@ def judge(obj, pre, post, defender, defender_pre, assume_baseline=False):
                f"defender documented it={r.get('claimed')}")
 
     if not r.get("claimed"):
-        return None, why + ["defender did not document stopping this vector in its manifest"]
+        return [], why + ["defender did not document stopping this vector in its manifest"]
     if not r.get("legit_ok"):
-        return None, why + ["legitimate service broken (a fix that kills the service is not a fix)"]
+        return [], why + ["legitimate service broken (a fix that kills the service is not a fix)"]
     if post_status == "open":
-        return None, why + ["attacker can still reach it; not awarding"]
+        return [], why + ["attacker can still reach it; not awarding"]
 
-    if r.get("state_ok"):
-        return "remediate", why + ["underlying flaw fixed, service works, documented"]
+    # Stages are additive (RESEARCH.md): a fix the attacker also confirms closed earns both.
+    stages = []
     if post_status == "closed":
-        return "block", why + ["attacker blocked and service works, but underlying flaw not corrected (containment only)"]
-    return None, why + ["no attacker confirmation and underlying flaw not fixed"]
+        stages.append("block")
+        why.append("attacker independently confirmed the vector is closed")
+    if r.get("state_ok"):
+        stages.append("remediate")
+        why.append("underlying flaw fixed, service works, documented")
+    elif stages:
+        why.append("underlying flaw not corrected (containment only)")
+    if not stages:
+        return [], why + ["no attacker confirmation and underlying flaw not fixed"]
+    return stages, why
 
 
 def main():
@@ -118,25 +127,29 @@ def main():
     outdir = pathlib.Path(a.evidence_dir); outdir.mkdir(parents=True, exist_ok=True)
 
     for obj in OBJECTIVES:
-        stage, reasons = judge(obj, pre, post, dfn, dpre, assume_baseline=not a.strict_baseline)
-        print(f"\n[{obj}] -> {stage or 'no award'}")
+        stages, reasons = judge(obj, pre, post, dfn, dpre, assume_baseline=not a.strict_baseline)
+        print(f"\n[{obj}] -> {' + '.join(stages) or 'no award'}")
         for r in reasons:
             print(f"    - {r}")
-        if not stage or not a.apply:
+        if not a.apply:
             continue
-        ev = outdir / f"attest-{a.round}-{obj}-{stage}.json"
-        ev.write_text(json.dumps({
-            "round": a.round, "objective": obj, "stage": stage, "reasons": reasons,
-            "attacker_pre": pre and pre["objectives"].get(obj), "attacker_post": post["objectives"].get(obj),
-            "post_connectivity": post.get("connectivity"),
-            "defender_report": [r for r in dfn["results"] if r.get("objective") == obj],
-            "unmatched_claims": dfn.get("unmatched_claims_for_referee"),
-            "defender_checked_at": dfn.get("checked_at"), "attacker_checked_at": post.get("checked_at"),
-        }, indent=2), encoding="utf-8")
-        r = subprocess.run([sys.executable, str(SCORING_PY), "--db", a.db, "attest",
-                            a.round, "blue", obj, stage, str(ev.resolve())],
-                           capture_output=True, text=True, cwd=SCORING_PY.parent)
-        print("    ledger:", (r.stdout or r.stderr).strip().replace("\n", " "))
+        for stage in stages:
+            ev = outdir / f"attest-{a.round}-{obj}-{stage}.json"
+            n = 2
+            while ev.exists():  # never overwrite evidence the ledger may already hold a hash of
+                ev = outdir / f"attest-{a.round}-{obj}-{stage}-{n}.json"; n += 1
+            ev.write_text(json.dumps({
+                "round": a.round, "objective": obj, "stage": stage, "reasons": reasons,
+                "attacker_pre": pre and pre["objectives"].get(obj), "attacker_post": post["objectives"].get(obj),
+                "post_connectivity": post.get("connectivity"),
+                "defender_report": [r for r in dfn["results"] if r.get("objective") == obj],
+                "unmatched_claims": dfn.get("unmatched_claims_for_referee"),
+                "defender_checked_at": dfn.get("checked_at"), "attacker_checked_at": post.get("checked_at"),
+            }, indent=2), encoding="utf-8")
+            r = subprocess.run([sys.executable, str(SCORING_PY), "--db", a.db, "attest",
+                                a.round, "blue", obj, stage, str(ev.resolve())],
+                               capture_output=True, text=True, cwd=SCORING_PY.parent)
+            print(f"    ledger ({stage}):", (r.stdout or r.stderr).strip().replace("\n", " "))
     if not a.apply:
         print("\n(dry run -- pass --apply to write awards to the ledger)")
 

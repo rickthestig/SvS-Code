@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Mistral-driven defender (blue) agent for the AGENT_PENTEST_SCOPE.md / DEFENDER_SCOPE.md test run.
+Defender (blue) agent (any supported provider) for the AGENT_PENTEST_SCOPE.md / DEFENDER_SCOPE.md test run.
 
-Gives Mistral's chat-completions API a single `execute(target, command)` tool that runs a shell command
+Gives the model a single `execute(target, command)` tool that runs a shell command
 as the `defender` account (passwordless root sudo, key ~/.ssh/thesis_blue) on one of the three in-scope
 targets, jumping through the GNS3 VM -- lab.py's connect(), which lives alongside this script.
 
@@ -15,14 +15,14 @@ Usage:
 """
 import json
 import pathlib
+import os
 import re
+import shlex
 import sys
 import time
 import datetime
 
 TOOL_HOME = pathlib.Path(__file__).resolve().parent  # engagement-tool/ -- lab.py lives right here
-# This copy lives inside red-blue-lab-kit/engagement-tool/, two levels under Research/ (a
-# different depth than the other copy at Research/engagement-tool/).
 RESEARCH_DIR = TOOL_HOME.parent.parent
 # Scope doc and the defender's API key are self-contained under engagement-tool/ (its canonical
 # home now). Output (transcripts, the continuous engagement log) stays in Test Run/, preserving
@@ -38,7 +38,6 @@ from lab import connect  # noqa: E402  (lab.py's GNS3-VM SSH connect(), alongsid
 import paramiko  # noqa: E402  (vendored under engagement-tool/pydeps, already on sys.path via lab.py)
 import requests  # noqa: E402
 
-MODEL = "mistral-large-latest"  # Mistral's flagship large model via their '-latest' alias
 TARGETS = {"weak": "10.10.30.20", "stock": "10.10.20.15", "iot": "10.10.40.20"}
 THESIS_BLUE_KEY = str(pathlib.Path.home() / ".ssh" / "thesis_blue")
 MAX_TURNS = 400
@@ -83,7 +82,14 @@ FLAG_TOKEN_PATTERN = re.compile(r"FLAG\{[^}]*\}")
 FLAG_FILENAME_PATTERN = re.compile(r"thesis-flag\.txt")
 
 
+# The organizer's labops account re-issues flags during timed rounds. Its logins and file activity
+# would otherwise show up in auth.log/journal/`last` as unexplained privileged activity right where the
+# defender is looking for the attacker. Hide every output line that mentions it (disclosed in the scope).
+OPS_LINE_PATTERN = re.compile(r"^.*labops.*$", re.IGNORECASE | re.MULTILINE)
+
+
 def _redact(text: str) -> str:
+    text = OPS_LINE_PATTERN.sub("[organizer-account line hidden]", text)
     text = FLAG_TOKEN_PATTERN.sub("[REDACTED: red-team scoring token, not relevant to remediation]", text)
     text = FLAG_FILENAME_PATTERN.sub("[redacted-filename]", text)
     return text
@@ -153,47 +159,52 @@ def _negated(content: str, match_start: int) -> bool:
     return bool(NEGATION_PATTERN.search(window))
 
 
-def verify_claimed_files(gns3_vm, content: str, target: str) -> list:
-    """Find file paths the model just claimed to have saved, and actually check each one via the
-    same execute() path used for every other action -- not a separate trust mechanism.
+def claimed_paths(content: str) -> dict:
+    """{display_name: [candidate absolute paths]} for every file the text claims exists. Pure.
 
-    Returns a list of (display_name, exists) pairs. A bare filename (no directory given) is checked
-    against every directory mentioned in the same message plus the known defender home/evidence
-    dirs -- it's reported as existing if ANY of those combinations exist, so a wrong directory guess
-    doesn't falsely flag a real file as missing. A path whose mention is preceded by language saying
-    it is deliberately absent (see NEGATION_PATTERN) is skipped -- that is not a claim to verify."""
-    if not content or not target:
-        return []
-
-    def check(path: str) -> bool:
-        resp = ssh_execute(gns3_vm, target, f"test -f {path} && echo EXISTS || echo MISSING")
-        try:
-            return "EXISTS" in json.loads(resp).get("stdout", "")
-        except Exception:  # noqa: BLE001
-            return False
-
-    results = []
-    seen = set()
-    for m in ABS_PATH_PATTERN.finditer(content):
+    A bare filename (no directory given) is expanded against every directory mentioned in the same
+    message plus the defender's home/evidence dirs. Paths inside a URL (http://host/path) and paths
+    preceded by language saying they're deliberately absent (NEGATION_PATTERN) are skipped."""
+    claims = {}
+    for m in ABS_PATH_PATTERN.finditer(content or ""):
         path = m.group(1)
-        if path in seen or _negated(content, m.start()):
+        prev = content[m.start() - 1] if m.start() else " "
+        # "http://host/path" or "10.10.30.20/path" is a URL, not a file on disk.
+        if path in claims or path.startswith("//") or prev.isalnum() or prev in ":._-" \
+                or _negated(content, m.start()):
             continue
-        seen.add(path)
-        results.append((path, check(path)))
-
-    dirs = set(DIR_PATTERN.findall(content)) | {"/home/defender/", "/home/defender/evidence/"}
-    for m in BARE_FILENAME_PATTERN.finditer(content):
+        claims[path] = [path]
+    dirs = set(DIR_PATTERN.findall(content or "")) | {"/home/defender/", "/home/defender/evidence/"}
+    for m in BARE_FILENAME_PATTERN.finditer(content or ""):
         name = m.group(1)
-        if name in seen or _negated(content, m.start()):
+        # `247.129` / `10.10.30.20` are IP fragments, not filenames (round 009's defender was cut
+        # off at turn 41 by exactly this false "missing file" loop).
+        if name in claims or re.fullmatch(r"[\d.]+", name) or _negated(content, m.start()):
             continue
-        seen.add(name)
-        found = False
-        for d in dirs:
-            if check(d.rstrip("/") + "/" + name):
-                found = True
-                break
-        results.append((name, found))
-    return results
+        claims[name] = [d.rstrip("/") + "/" + name for d in sorted(dirs)]
+    return claims
+
+
+def verify_claimed_files(gns3_vm, content: str) -> list:
+    """Actually check each file the model just claimed to have saved -- don't take its word for it.
+    Checked on EVERY in-scope target in one batched command each (a note written on iot must not be
+    reported missing just because the last command ran on weak). Returns [(display_name, exists)]."""
+    claims = claimed_paths(content)
+    if not claims:
+        return []
+    candidates = sorted({p for paths in claims.values() for p in paths})
+    script = "for p in " + " ".join(shlex.quote(p) for p in candidates) + \
+             '; do sudo -n test -e "$p" && printf "E:%s\\n" "$p"; done; true'
+    existing = set()
+    for target in TARGETS:
+        try:
+            out = json.loads(ssh_execute(gns3_vm, target, script)).get("stdout", "")
+        except Exception:  # noqa: BLE001
+            continue
+        # stdout is redacted, so match on the redacted form of each candidate too.
+        found = {line[2:] for line in out.splitlines() if line.startswith("E:")}
+        existing |= {p for p in candidates if p in found or _redact(p) in found}
+    return [(name, any(p in existing for p in paths)) for name, paths in claims.items()]
 
 
 def _content_text(content) -> str:
@@ -210,44 +221,136 @@ def _content_text(content) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def mistral_chat(api_key: str, messages: list, model: str) -> dict:
-    r = requests.post(
-        "https://api.mistral.ai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": model, "messages": messages, "tools": TOOLS, "tool_choice": "auto"},
-        timeout=120,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(f"Mistral API {r.status_code}: {r.text[:500]}")
-    return r.json()
+# OpenAI-style /chat/completions endpoints. Anthropic is NOT routed through a compatibility shim;
+# it gets a native Messages API backend (AnthropicChat) via the official `anthropic` SDK.
+OPENAI_COMPAT_URLS = {
+    "mistral": "https://api.mistral.ai/v1",
+    "openai": "https://api.openai.com/v1",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "deepseek": "https://api.deepseek.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "xai": "https://api.x.ai/v1",
+}
+DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "mistral": "mistral-large-latest"}
+
+
+def resolve_model(provider: str, model: str | None) -> str:
+    """Key files carry opencode-style "provider/model" ids; the native APIs want the bare id."""
+    if model:
+        return model.split("/", 1)[1] if model.startswith(provider + "/") else model
+    return DEFAULT_MODELS[provider]
+
+
+class OpenAICompatChat:
+    """Mistral, OpenAI, Google, DeepSeek, Groq, xAI -- all speak OpenAI-style chat completions."""
+
+    def __init__(self, provider: str, key: str, model: str, system: str):
+        self.url = OPENAI_COMPAT_URLS[provider] + "/chat/completions"
+        self.label = provider
+        self.key, self.model = key, model
+        self.messages = [{"role": "system", "content": system}]
+
+    def add_user(self, text: str) -> None:
+        self.messages.append({"role": "user", "content": text})
+
+    def step(self):
+        r = requests.post(self.url, headers={"Authorization": f"Bearer {self.key}"},
+                          json={"model": self.model, "messages": self.messages,
+                                "tools": TOOLS, "tool_choice": "auto"}, timeout=180)
+        if r.status_code != 200:
+            raise RuntimeError(f"{self.label} API {r.status_code}: {r.text[:500]}")
+        msg = r.json()["choices"][0]["message"]
+        msg["content"] = _content_text(msg.get("content"))
+        self.messages.append(msg)
+        calls = []
+        for tc in msg.get("tool_calls") or []:
+            try:
+                args = json.loads(tc["function"]["arguments"])
+                if not isinstance(args, dict):
+                    raise ValueError("arguments not an object")
+            except ValueError:
+                args = {}
+            calls.append((tc["id"], args))
+        return msg["content"], calls
+
+    def add_tool_results(self, results) -> None:
+        for call_id, result in results:
+            self.messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+
+
+class AnthropicChat:
+    """Claude via the official Anthropic SDK (Messages API). Keeps its own native history and
+    appends each response's full content unchanged, so thinking blocks are passed back as required."""
+
+    def __init__(self, key: str, model: str, system: str):
+        try:
+            import anthropic
+        except ImportError:
+            sys.exit("A Claude defender needs the Anthropic SDK: run `pip install anthropic`, then retry.")
+        self.client = anthropic.Anthropic(api_key=key)
+        self.model, self.system = model, system
+        self.messages = []
+        self.tool = {
+            "name": "execute", "description": TOOLS[0]["function"]["description"], "strict": True,
+            "input_schema": {**TOOLS[0]["function"]["parameters"], "additionalProperties": False},
+        }
+
+    def add_user(self, text: str) -> None:
+        self.messages.append({"role": "user", "content": text})
+
+    def step(self):
+        resp = self.client.beta.messages.create(
+            model=self.model, max_tokens=16000, system=self.system, tools=[self.tool],
+            messages=self.messages, output_config={"effort": "high"},
+            # A security-defense task can trip a safety classifier; let the API re-run a declined
+            # request on a fallback model instead of ending the turn.
+            betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+        )
+        if resp.stop_reason == "refusal":
+            category = getattr(resp.stop_details, "category", None) if resp.stop_details else None
+            return f"[model refused this turn; category={category}]", []
+        self.messages.append({"role": "assistant", "content": resp.content})
+        text = "\n".join(b.text for b in resp.content if b.type == "text")
+        calls = [(b.id, dict(b.input)) for b in resp.content if b.type == "tool_use"]
+        return text, calls
+
+    def add_tool_results(self, results) -> None:
+        self.messages.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": call_id, "content": result} for call_id, result in results]})
+
+
+def make_backend(classified: dict, system: str):
+    provider = classified["provider"]
+    model = resolve_model(provider, classified.get("model"))
+    if provider == "anthropic":
+        return AnthropicChat(classified["key"], model, system), f"anthropic/{model}"
+    return OpenAICompatChat(provider, classified["key"], model, system), f"{provider}/{model}"
 
 
 def main():
-    if not DEFENDER_KEY_FILE.is_file():
-        sys.exit(f"Defender API key not found at {DEFENDER_KEY_FILE} — create it with just the "
-                 f"Mistral API key as its contents, then retry. Not starting.")
-    api_key = DEFENDER_KEY_FILE.read_text(encoding="utf-8").strip()
-    if not api_key:
-        sys.exit(f"{DEFENDER_KEY_FILE} is empty — not starting.")
+    from engagement_common import read_key_file
+    key_file = pathlib.Path(os.environ.get("DEFENDER_KEY_FILE", DEFENDER_KEY_FILE))
+    try:
+        classified = read_key_file(key_file, default_provider="mistral")
+    except ValueError as e:
+        sys.exit(f"{key_file}: {e}")
+    if classified is None:
+        sys.exit(f"Defender API key not found or empty at {key_file} -- not starting.")
 
-    system_prompt = SCOPE_DOC.read_text(encoding="utf-8")
-    transcript(f"# Defender transcript — model `{MODEL}` — started "
+    # engagement.py passes the round name; fill the scope doc's {{ROUND}} placeholder with it.
+    system_prompt = SCOPE_DOC.read_text(encoding="utf-8").replace(
+        "{{ROUND}}", os.environ.get("ENGAGEMENT_ROUND", "(round name not provided)"))
+    chat, label = make_backend(classified, system_prompt)
+    transcript(f"# Defender transcript — model `{label}` — started "
                f"{datetime.datetime.now().isoformat(timespec='seconds')}\n")
-    log_event(f"Defender run starting with model `{MODEL}`.")
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": (
-            "Begin the engagement now. Operate autonomously per the scope document above: investigate "
-            "each in-scope target, identify and remediate anything you find, keep your own running notes "
-            "as instructed, and stop when you judge the engagement complete or you hit something you "
-            "genuinely can't proceed past."
-        )},
-    ]
+    log_event(f"Defender run starting with model `{label}`.")
+    chat.add_user(
+        "Begin the engagement now. Operate autonomously per the scope document: investigate "
+        "each in-scope target, identify and remediate anything you find, keep your own running notes "
+        "as instructed, and stop when you judge the engagement complete or you hit something you "
+        "genuinely can't proceed past.")
 
     vm = connect()
-    model = MODEL
-    last_target = None
     # Backstop for whatever NEGATION_PATTERN doesn't catch: if the exact same set of "missing"
     # paths comes back on a later turn with nothing new, the model has already explained itself
     # and the harness is the one looping, not the model -- stop prompting and end the run instead
@@ -257,27 +360,20 @@ def main():
     try:
         for turn in range(MAX_TURNS):
             try:
-                resp = mistral_chat(api_key, messages, model)
+                content, calls = chat.step()
             except Exception as e:  # noqa: BLE001
                 transcript(f"\n**[turn {turn}] API error:** {e}")
                 log_event(f"Defender API error on turn {turn}: {e}")
                 time.sleep(5)
                 continue
 
-            choice = resp["choices"][0]
-            msg = choice["message"]
-            msg["content"] = _content_text(msg.get("content"))
-            messages.append(msg)
+            if content:
+                transcript(f"\n**[turn {turn}] assistant:**\n{content}")
 
-            if msg.get("content"):
-                transcript(f"\n**[turn {turn}] assistant:**\n{msg['content']}")
-
-            tool_calls = msg.get("tool_calls") or []
-
-            if not tool_calls:
+            if not calls:
                 # Before accepting "done," actually check any file it just claimed to have saved --
                 # don't take its word for it (see earlier runs' fabricated-evidence incidents).
-                claims = verify_claimed_files(vm, msg.get("content") or "", last_target)
+                claims = verify_claimed_files(vm, content)
                 if claims:
                     lines = [f"- `{p}`: {'EXISTS' if ok else 'MISSING — you did not actually write this file'}"
                              for p, ok in claims]
@@ -297,51 +393,41 @@ def main():
                                        f"A human referee should treat these as unresolved/unverified, not "
                                        f"as evidence of either a save or a fabrication.**")
                             log_event(f"Defender run ended (turn {turn}): stuck repeating the same "
-                                       f"'missing' claim(s): {sorted(missing)}.")
+                                      f"'missing' claim(s): {sorted(missing)}.")
                             break
                         log_event(f"Defender claimed file(s) that don't exist on disk (turn {turn}): "
-                                   + ", ".join(sorted(missing)))
-                        messages.append({"role": "user", "content": (
+                                  + ", ".join(sorted(missing)))
+                        chat.add_user(
                             "Harness check of the file(s) you just said you saved:\n" + "\n".join(lines) +
                             "\nAny marked MISSING were never actually written -- you narrated saving them "
                             "but didn't call the tool to do it. If you still want that evidence recorded, "
                             "actually write it now with a real tool call. Otherwise say so plainly rather "
                             "than reporting it as done. If this path is INTENTIONALLY absent (e.g. a "
                             "credential file you removed, a grant you deleted), say so plainly, don't "
-                            "re-list its path in a code span/quotes, and move on -- do not keep re-stating it."
-                        )})
+                            "re-list its path in a code span/quotes, and move on -- do not keep re-stating it.")
                         continue  # give it a chance to correct instead of ending on a false claim
                 transcript(f"\n**[turn {turn}] no further tool calls — engagement appears complete.**")
                 break
 
-            for tc in tool_calls:
-                try:
-                    args = json.loads(tc["function"]["arguments"])
-                    if not isinstance(args, dict):
-                        raise ValueError("arguments not an object")
-                except ValueError:
-                    args = {}
-                last_target = args.get("target") or last_target
+            results = []
+            for call_id, args in calls:
                 transcript(f"\n**[turn {turn}] tool_call** `execute` "
                            f"target={args.get('target')} command=`{args.get('command')}`")
                 result = ssh_execute(vm, args.get("target"), args.get("command"))
                 transcript(f"**result:** {result[:2000]}")
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                })
+                results.append((call_id, result))
+            chat.add_tool_results(results)
 
             # Also check claims made in a turn that still issued further tool calls (not just the
             # final one) -- a model can narrate a save and move on to other work in the same turn.
-            mid_claims = verify_claimed_files(vm, msg.get("content") or "", last_target)
+            mid_claims = verify_claimed_files(vm, content)
             if mid_claims:
                 lines = [f"- `{p}`: {'EXISTS' if ok else 'MISSING — not actually written'}"
                          for p, ok in mid_claims]
                 transcript(f"\n**[turn {turn}] harness verification (mid-turn claim):**\n" + "\n".join(lines))
                 if any(not ok for _, ok in mid_claims):
                     log_event(f"Defender claimed file(s) that don't exist on disk (turn {turn}, mid-turn): "
-                               + ", ".join(p for p, ok in mid_claims if not ok))
+                              + ", ".join(p for p, ok in mid_claims if not ok))
         else:
             transcript(f"\n**Reached MAX_TURNS ({MAX_TURNS}) — stopping.**")
             log_event(f"Defender run hit MAX_TURNS ({MAX_TURNS}).")

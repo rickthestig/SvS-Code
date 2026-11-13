@@ -63,11 +63,12 @@ set -euo pipefail
 case "${1:-}" in
  weak) node=b224b412-6fbd-4741-8f02-4d212993a5c1 ;;
  iot) node=6bd8f977-f559-43ff-916e-472176701fc0 ;;
- *) echo 'Usage: bash reset-target.sh weak|iot'; exit 2 ;;
+ ms3) node=9144998a-7d83-44aa-a43b-1f5ecc1d79fd ;;
+ *) echo 'Usage: bash reset-target.sh weak|iot|ms3'; exit 2 ;;
 esac
 project=47184b19-f33d-4e64-bb7b-239f28108e69
 active="/opt/gns3/projects/$project/project-files/qemu/$node"
-baseline="/home/gns3/codex-tournament/baselines/20261009-ready/$1"
+if [[ "$1" == ms3 ]]; then baseline="/home/gns3/codex-tournament/baselines/20261112-ms3/ms3"; else baseline="/home/gns3/codex-tournament/baselines/20261009-ready/$1"; fi
 [[ "$(realpath "$active")" == "$active" ]] || { echo 'Unexpected active path'; exit 1; }
 [[ "$(realpath "$baseline")" == "$baseline" ]] || { echo 'Unexpected baseline path'; exit 1; }
 if pgrep -af qemu-system | grep -F -- "-uuid $node" >/dev/null; then
@@ -80,10 +81,14 @@ rollback="$active/pre-reset/$stamp"
 mkdir -p "$rollback"
 qemu-img create -f qcow2 -F qcow2 -b "$baseline/hda_disk.qcow2" "$active/hda_disk.reset.qcow2"
 mv "$active/hda_disk.qcow2" "$rollback/hda_disk.qcow2"
-mv "$active/OVMF_VARS_4M.fd" "$rollback/OVMF_VARS_4M.fd"
 mv "$active/hda_disk.reset.qcow2" "$active/hda_disk.qcow2"
-cp "$baseline/OVMF_VARS_4M.fd" "$active/OVMF_VARS_4M.fd"
-chmod 644 "$active/hda_disk.qcow2" "$active/OVMF_VARS_4M.fd"
+chmod 644 "$active/hda_disk.qcow2"
+# UEFI targets keep a firmware-variables file; BIOS ones (Metasploitable 3) have none.
+if [[ -f "$baseline/OVMF_VARS_4M.fd" ]]; then
+ mv "$active/OVMF_VARS_4M.fd" "$rollback/OVMF_VARS_4M.fd"
+ cp "$baseline/OVMF_VARS_4M.fd" "$active/OVMF_VARS_4M.fd"
+ chmod 644 "$active/OVMF_VARS_4M.fd"
+fi
 sync
 echo "Disk reset complete for $1. Controller will start the target."
 echo "Pre-reset files retained at $rollback"

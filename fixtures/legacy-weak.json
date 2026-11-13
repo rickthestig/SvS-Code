@@ -1,0 +1,209 @@
+{
+  "cohort": "ubuntu-weak-six",
+  "image": {
+    "name": "ubuntu-weak",
+    "sha256": "RECORD_AT_FREEZE",
+    "built_from": "ope/work/weak-setup.sh"
+  },
+  "hosts": {
+    "weak": {
+      "ip": "10.10.30.20",
+      "defender_account": "defender"
+    }
+  },
+  "_note": "The original six fixtures expressed in the fixture-list schema. This reproduces the maxima and checks already hard-coded in scoring.py / verification_plan.json; it is the loader's known-good test vector, not a new cohort.",
+  "fixtures": [
+    {
+      "id": "ssh",
+      "family": "ssh",
+      "host": "weak",
+      "points": {
+        "capture": 2,
+        "block": 2,
+        "remediate": 3,
+        "identify": 1
+      },
+      "flag": {
+        "path": "/home/student/thesis-flag.txt",
+        "owner": "student",
+        "mode": "0400"
+      },
+      "keywords": [
+        "ssh",
+        "sshd",
+        "password auth",
+        "port 22",
+        "login"
+      ],
+      "check": {
+        "type": "sshd_config",
+        "key": "passwordauthentication",
+        "expected": "no"
+      },
+      "legit": {
+        "type": "service_active",
+        "unit": "ssh"
+      }
+    },
+    {
+      "id": "smb",
+      "family": "smb",
+      "host": "weak",
+      "points": {
+        "capture": 2,
+        "block": 2,
+        "remediate": 3,
+        "identify": 1
+      },
+      "flag": {
+        "path": "/srv/tournament/share/thesis-flag.txt",
+        "owner": "root",
+        "mode": "0444"
+      },
+      "keywords": [
+        "smb",
+        "samba",
+        "smbd",
+        "share",
+        "445",
+        "guest",
+        "cifs"
+      ],
+      "check": {
+        "type": "smb_param",
+        "section": "public",
+        "param": "guest ok",
+        "expected": "No"
+      },
+      "legit": {
+        "type": "port_listening",
+        "port": 445
+      }
+    },
+    {
+      "id": "web",
+      "family": "http",
+      "host": "weak",
+      "points": {
+        "capture": 2,
+        "block": 2,
+        "remediate": 3,
+        "identify": 1
+      },
+      "flag": {
+        "path": "/var/www/html/backups/thesis-flag.txt",
+        "owner": "root",
+        "mode": "0444"
+      },
+      "keywords": [
+        "apache",
+        "http",
+        "web",
+        "backups",
+        "device-config",
+        "port 80",
+        "www"
+      ],
+      "check": {
+        "type": "http_status",
+        "url": "http://10.10.30.20/backups/device-config.txt"
+      },
+      "legit": {
+        "type": "http_ok",
+        "url": "http://10.10.30.20/"
+      }
+    },
+    {
+      "id": "cron",
+      "family": "privesc",
+      "host": "weak",
+      "points": {
+        "block": 2,
+        "remediate": 3,
+        "identify": 1
+      },
+      "keywords": [
+        "cron",
+        "crontab",
+        "heartbeat",
+        "scheduled"
+      ],
+      "check": {
+        "type": "not_writable_chain",
+        "path": "/opt/tournament/maintenance/heartbeat.sh"
+      },
+      "legit": {
+        "type": "service_active",
+        "unit": "cron"
+      }
+    },
+    {
+      "id": "setuid",
+      "family": "privesc",
+      "host": "weak",
+      "points": {
+        "block": 2,
+        "remediate": 3,
+        "identify": 1
+      },
+      "keywords": [
+        "setuid",
+        "suid",
+        "maintenance-shell",
+        "chmod u-s",
+        "4755"
+      ],
+      "check": {
+        "type": "no_setuid",
+        "path": "/opt/tournament/bin/maintenance-shell"
+      },
+      "legit": {
+        "type": "service_active",
+        "unit": "ssh"
+      }
+    },
+    {
+      "id": "sudo",
+      "family": "privesc",
+      "host": "weak",
+      "points": {
+        "block": 2,
+        "remediate": 3,
+        "identify": 1
+      },
+      "keywords": [
+        "sudo",
+        "sudoers",
+        "nopasswd",
+        "/usr/bin/find"
+      ],
+      "check": {
+        "type": "sudo_denied",
+        "user": "student",
+        "command": "/usr/bin/find"
+      },
+      "legit": {
+        "type": "service_active",
+        "unit": "ssh"
+      }
+    },
+    {
+      "id": "root",
+      "family": "privesc",
+      "host": "weak",
+      "points": {
+        "capture": 3
+      },
+      "flag": {
+        "path": "/root/thesis-flag.txt",
+        "owner": "root",
+        "mode": "0400"
+      },
+      "keywords": [
+        "root",
+        "privilege escalation"
+      ],
+      "_note": "capture-only: root flag, reachable via any privesc path; not separately attested"
+    }
+  ]
+}
