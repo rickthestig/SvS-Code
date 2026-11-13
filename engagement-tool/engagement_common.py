@@ -755,20 +755,33 @@ def extract_flags(texts) -> list[str]:
     return list(seen)
 
 
-def submit_flags(round_name: str, tokens: list[str]) -> dict[str, str]:
-    """Submit each token to the ledger under whichever objective accepts it.
-    Returns {token: objective-or-reason}."""
+def submit_flags(round_name: str, tokens: list[str], fixture_set=None,
+                 evidence_dir: pathlib.Path | None = None) -> dict[str, str]:
+    """Submit each token to the ledger under whichever objective accepts it. With a fixture set, use
+    its flag objectives and per-fixture tick weight, and award red's one-time first-blood bonus the
+    first time an *exploit* fixture is captured. Returns {token: objective-or-reason}."""
     sys.path.insert(0, str(LAB_KIT_DIR))
     from scoring import Ledger
+    objectives = fixture_set.flag_ids if fixture_set else FLAG_OBJECTIVES
+    exploit = set(fixture_set.exploit_ids) if fixture_set else set()
     ledger = Ledger(LAB_KIT_DIR / "private" / "score.db")
     results = {}
     try:
         for token in tokens:
             results[token] = "rejected (no objective matched, or already scored)"
-            for objective in FLAG_OBJECTIVES:
+            for objective in objectives:
+                tp = fixture_set.tick_points(objective) if fixture_set else 1
                 try:
-                    if ledger.submit(round_name, objective, token)["accepted"]:
+                    if ledger.submit(round_name, objective, token, tick_points=tp)["accepted"]:
                         results[token] = objective
+                        if objective in exploit and evidence_dir:  # one-time first-blood bonus
+                            ev = evidence_dir / f"firstblood-{objective}.json"
+                            ev.write_text(json.dumps({"round": round_name, "objective": objective,
+                                                      "token_digest": "see ledger"}), encoding="utf-8")
+                            r = ledger.firstblood(round_name, objective, ev,
+                                                  fixture_set.firstblood_points(objective))
+                            if r["accepted"]:
+                                results[token] += " (+first blood)"
                         break
                 except ValueError as e:  # round unknown/expired
                     results[token] = f"rejected: {e}"
@@ -790,6 +803,29 @@ def tick_due(last_tick_at: float, now: float, minutes: float) -> bool:
 def cap_reached(started_epoch: float | None, now: float, max_minutes: float) -> bool:
     """Round time cap: equal wall-clock for both sides. 0 = no cap."""
     return bool(max_minutes) and started_epoch is not None and now - started_epoch >= max_minutes * 60
+
+
+FIXTURES_DIR = LAB_KIT_DIR / "fixtures"
+
+
+def load_fixture_set(name: str = "legacy-weak"):
+    sys.path.insert(0, str(FIXTURES_DIR))
+    from fixtures import FixtureSet
+    return FixtureSet.load(FIXTURES_DIR / f"{name}.json")
+
+
+def read_declared_takedown(ip: str) -> str | None:
+    """The one service blue declared it is taking offline, from its manifest; None if absent/down."""
+    try:
+        client = target_ssh(ip)
+        try:
+            _, out, _ = run(client, "cat /home/defender/remediation_manifest.json 2>/dev/null || true")
+        finally:
+            client.close()
+        m = json.loads(out)
+        return m.get("declared_takedown") if isinstance(m, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def hold_decisions(probe_report: dict, legit: dict) -> dict:
@@ -820,19 +856,21 @@ def legit_checks() -> dict:
         client.close()
 
 
-def run_tick(round_name: str, tick: int, evidence_dir: pathlib.Path) -> dict:
+def run_tick(round_name: str, tick: int, evidence_dir: pathlib.Path, fixture_set=None) -> dict:
     """One interval: (1) re-issue this interval's flags on Ubuntu-Weak (skipping any location the
-    defender legitimately removed), (2) probe every objective and the legitimate services, (3) record
-    blue holds and a health sample in the ledger. Returns the evidence dict it saved."""
+    defender legitimately removed), (2) probe every objective and the legitimate services, (3) score
+    the interval through the policy (config holds, exploit contains, first-blood deferred to collect)
+    and record a health sample. Returns the evidence dict it saved."""
     import io
     import attacker_verify as av
     sys.path.insert(0, str(LAB_KIT_DIR))
     from scoring import Ledger
 
+    fs = fixture_set or load_fixture_set()
     evidence_dir.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(LAB_KIT_DIR / "private" / "score.db")
     try:
-        tokens = ledger.rotate(round_name, tick)
+        tokens = ledger.rotate(round_name, tick, objectives=fs.flag_ids)
     finally:
         ledger.db.close()
     bundle = LAB_KIT_DIR / "private" / f"{round_name}-tick-{tick:02d}-flags.json"
@@ -859,20 +897,33 @@ def run_tick(round_name: str, tick: int, evidence_dir: pathlib.Path) -> dict:
         legit = legit_checks()
     except Exception as e:  # noqa: BLE001
         legit = {"error": str(e)}
-    holds = hold_decisions(probes, legit if "error" not in legit else {})
-    healthy = "error" not in legit and all(v["ok"] for v in legit.values())
+
+    # Score this interval through the policy, driven by the fixture set (config vs exploit split,
+    # per-fixture weights, and blue's declared takedown). Legacy = all config, so it reduces to holds.
+    sys.path.insert(0, str(FIXTURES_DIR))
+    import scoring_policy as sp
+    kinds = fs.kinds_for_blue()
+    objs = probes.get("objectives", {})
+    probe_reachable = {o: (r.get("status") != "closed") for o, r in objs.items()}  # fixed iff 'closed'
+    legit_ok = {} if "error" in legit else {o: v["ok"] for o, v in legit.items()}
+    declared = sp.valid_takedown(read_declared_takedown(NODES["weak"][1]), kinds["exploit"])
+    awards = sp.tick_awards(kinds, probe_reachable, legit_ok, captures=set(),
+                            declared_takedown=declared, firstblood_seen=set())  # captures scored at collect
 
     evidence = {"round": round_name, "tick": tick, "flag_placement": placement,
-                "probes": probes, "legit": legit, "holds": holds, "healthy": healthy}
+                "probes": probes, "legit": legit, "declared_takedown": declared,
+                "blue_hold": awards["blue_hold"], "blue_contain": awards["blue_contain"],
+                "healthy": awards["healthy"]}
     ev_path = evidence_dir / f"tick-{tick:02d}.json"
     ev_path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
 
     ledger = Ledger(LAB_KIT_DIR / "private" / "score.db")
     try:
-        for obj, held in holds.items():
-            if held:
-                ledger.hold(round_name, tick, obj, ev_path)
-        ledger.health(round_name, f"tick-{tick}", healthy, ev_path)
+        for obj in awards["blue_hold"]:
+            ledger.hold(round_name, tick, obj, ev_path, points=fs.tick_points(obj))
+        for obj in awards["blue_contain"]:
+            ledger.contain(round_name, tick, obj, ev_path, points=fs.tick_points(obj))
+        ledger.health(round_name, f"tick-{tick}", awards["healthy"], ev_path)
     finally:
         ledger.db.close()
     return evidence

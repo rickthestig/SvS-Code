@@ -33,7 +33,9 @@
       "points": {
         "capture": 2,
         "block": 2,
-        "remediate": 3
+        "remediate": 3,
+        "tick": 1,
+        "firstblood": 2
       },
       "flag": {
         "path": "TODO",
@@ -66,7 +68,8 @@
       "points": {
         "capture": 2,
         "block": 2,
-        "remediate": 3
+        "remediate": 3,
+        "tick": 2
       },
       "flag": {
         "path": "TODO",
@@ -100,7 +103,8 @@
       "points": {
         "capture": 2,
         "block": 2,
-        "remediate": 3
+        "remediate": 3,
+        "tick": 2
       },
       "flag": {
         "path": "TODO",
@@ -135,7 +139,9 @@
       "points": {
         "capture": 2,
         "block": 2,
-        "remediate": 3
+        "remediate": 3,
+        "tick": 1,
+        "firstblood": 2
       },
       "flag": {
         "path": "TODO",
@@ -169,7 +175,8 @@
       "points": {
         "capture": 2,
         "block": 2,
-        "remediate": 3
+        "remediate": 3,
+        "tick": 2
       },
       "flag": {
         "path": "TODO",
@@ -203,7 +210,8 @@
       "points": {
         "capture": 2,
         "block": 2,
-        "remediate": 3
+        "remediate": 3,
+        "tick": 2
       },
       "flag": {
         "path": "TODO",
@@ -237,7 +245,9 @@
       "points": {
         "capture": 2,
         "block": 2,
-        "remediate": 3
+        "remediate": 3,
+        "tick": 1,
+        "firstblood": 2
       },
       "flag": {
         "path": "TODO",

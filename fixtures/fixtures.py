@@ -65,6 +65,23 @@ class FixtureSet:
     def by_id(self, fid: str) -> dict:
         return next(f for f in self.fixtures if f["id"] == fid)
 
+    @property
+    def blue_ids(self) -> list:
+        """Fixtures blue can score on (they have an operator check); excludes capture-only ones (root)."""
+        return [f["id"] for f in self.fixtures if "check" in f]
+
+    def tick_points(self, fid: str) -> int:
+        return int(self.by_id(fid).get("points", {}).get("tick", 1))
+
+    def firstblood_points(self, fid: str) -> int:
+        return int(self.by_id(fid).get("points", {}).get("firstblood", 0))
+
+    def kinds_for_blue(self) -> dict:
+        """{'config': [ids], 'exploit': [ids]} over blue-scorable fixtures only (for scoring_policy)."""
+        blue = set(self.blue_ids)
+        return {"config": [i for i in self.config_ids if i in blue],
+                "exploit": [i for i in self.exploit_ids if i in blue]}
+
     def families(self) -> dict:
         out = {}
         for f in self.fixtures:

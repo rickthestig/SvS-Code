@@ -135,6 +135,45 @@ class FixtureSetTests(unittest.TestCase):
                 {"id": "a", "family": "bogus", "host": "h", "points": {}}]})  # unknown family
 
 
+class WiringTests(unittest.TestCase):
+    """Ledger + submit_flags race wiring, without a VM."""
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "fixtures"))
+        from fixtures import FixtureSet
+        self.tmp = tempfile.TemporaryDirectory(); self.root = pathlib.Path(self.tmp.name)
+        (self.root / "private").mkdir()
+        self.l = Ledger(self.root / "private" / "score.db")
+        self.l.create("r", 300)
+        self.ev = self.root / "e.json"; self.ev.write_text("{}")
+        self.fs = FixtureSet({"cohort": "t", "hosts": {"h": {"ip": "1"}}, "fixtures": [
+            {"id": "web", "family": "http", "host": "h", "scoring": "config",
+             "points": {"capture": 2, "tick": 2}, "flag": {"path": "/f"}, "check": {"type": "x"}},
+            {"id": "irc", "family": "irc", "host": "h", "scoring": "exploit",
+             "points": {"capture": 2, "tick": 1, "firstblood": 2}, "flag": {"path": "/g"}, "check": {"type": "y"}}]})
+
+    def tearDown(self):
+        self.l.db.close(); self.tmp.cleanup()
+
+    def test_contain_and_firstblood_are_weighted_and_idempotent(self):
+        self.assertEqual(self.l.contain("r", 1, "irc", self.ev, points=1)["points"], 1)
+        self.assertEqual(self.l.firstblood("r", "irc", self.ev, 2)["points"], 2)
+        self.assertEqual(self.l.firstblood("r", "irc", self.ev, 2)["points"], 0)  # once only
+        rep = self.l.report("r")
+        self.assertEqual(rep["tick_blue_raw"], 1)   # contain
+        self.assertEqual(rep["tick_red_raw"], 2)    # first-blood bonus
+
+    def test_submit_flags_awards_first_blood_for_exploit(self):
+        import engagement_common as ec
+        toks = self.l.rotate("r", 1, objectives=self.fs.flag_ids)   # issue this interval's flags
+        with patch.object(ec, "LAB_KIT_DIR", self.root):
+            out = ec.submit_flags("r", [toks["irc"], toks["web"]], fixture_set=self.fs, evidence_dir=self.root)
+        self.assertIn("(+first blood)", out[toks["irc"]])
+        self.assertNotIn("first blood", out[toks["web"]])         # config fixture: no bonus
+        rep = self.l.report("r")
+        # red tick = irc capture(1) + web capture(2) + irc first-blood(2) = 5
+        self.assertEqual(rep["tick_red_raw"], 5)
+
+
 class ScoringPolicyTests(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, str(ROOT / "fixtures"))

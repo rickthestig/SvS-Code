@@ -220,8 +220,8 @@ def cmd_status(args) -> None:
                 print(f"-- interval {tick}: re-issuing flags and checking every vector --")
                 try:
                     ev = ec.run_tick(state["round"], tick, ec.TEST_RUN_DIR / f"ticks-{state['round']}")
-                    held = [o for o, h in ev["holds"].items() if h]
-                    print(f"   placed={ev['flag_placement'].get('placed')} held={held} healthy={ev['healthy']}")
+                    print(f"   placed={ev['flag_placement'].get('placed')} held={ev['blue_hold']} "
+                          f"contained={ev['blue_contain']} healthy={ev['healthy']}")
                 except Exception as e:  # noqa: BLE001 -- log it, keep the round going
                     print(f"   interval {tick} check failed: {e}")
                     ec.log_event(f"interval {tick} check failed for `{state['round']}`: {e}")

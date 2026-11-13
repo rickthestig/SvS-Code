@@ -54,7 +54,7 @@ class Ledger:
                 (rnd,role,objective,stage,points,evidence,time.time()))
         return {'accepted': bool(cur.rowcount), 'points': points if cur.rowcount else 0}
 
-    def submit(self, rnd, objective, token):
+    def submit(self, rnd, objective, token, tick_points=TICK_POINTS):
         self.active(rnd)
         row = self.db.execute('SELECT digest FROM flags WHERE round=? AND objective=?',
                               (rnd,objective)).fetchone()
@@ -64,7 +64,7 @@ class Ledger:
         # Timed-round mode: a re-issued flag counts once for the interval it belongs to.
         for (tick,) in self.db.execute('SELECT tick FROM tickflags WHERE round=? AND objective=? AND digest=?',
                                        (rnd,objective,digest)).fetchall():
-            return self.award(rnd,'red',objective,f'tick:{tick}:capture',TICK_POINTS,digest)
+            return self.award(rnd,'red',objective,f'tick:{tick}:capture',tick_points,digest)
         return {'accepted': False, 'points': 0}
 
     # ---- timed-round ("tick") mode -------------------------------------------------------
@@ -72,24 +72,33 @@ class Ledger:
     # flag it captured; blue earns TICK_POINTS per objective per interval it held closed while the
     # legitimate service worked. Tick events are reported separately from the classic score.
 
-    def rotate(self, rnd, tick):
+    def rotate(self, rnd, tick, objectives=None):
         if not isinstance(tick, int) or tick < 1:
             raise ValueError('Ticks are numbered from 1')
         self.active(rnd)
-        tokens = {c: 'FLAG{' + secrets.token_urlsafe(32) + '}' for c in (*INITIAL, 'root')}
+        tokens = {c: 'FLAG{' + secrets.token_urlsafe(32) + '}' for c in (objectives or (*INITIAL, 'root'))}
         with self.db:
             self.db.executemany('INSERT INTO tickflags VALUES (?,?,?,?)',
                 [(rnd,tick,c,hashlib.sha256(t.encode()).hexdigest()) for c,t in tokens.items()])
         return tokens
 
-    def hold(self, rnd, tick, objective, evidence):
-        if objective not in CHALLENGES:
-            raise ValueError('Unknown objective')
+    def hold(self, rnd, tick, objective, evidence, points=TICK_POINTS):
+        """Blue held a config fixture this interval (fix in place + service up)."""
         digest = hashlib.sha256(Path(evidence).read_bytes()).hexdigest()
-        return self.award(rnd,'blue',objective,f'tick:{tick}:hold',TICK_POINTS,digest)
+        return self.award(rnd,'blue',objective,f'tick:{tick}:hold',points,digest)
+
+    def contain(self, rnd, tick, objective, evidence, points=TICK_POINTS):
+        """Blue contained its declared-takedown exploit fixture this interval (attacker can't reach it)."""
+        digest = hashlib.sha256(Path(evidence).read_bytes()).hexdigest()
+        return self.award(rnd,'blue',objective,f'tick:{tick}:contain',points,digest)
+
+    def firstblood(self, rnd, objective, evidence, points):
+        """Red's one-time bonus for first exploiting an exploit fixture (idempotent per objective)."""
+        digest = hashlib.sha256(Path(evidence).read_bytes()).hexdigest()
+        return self.award(rnd,'red',objective,'bonus:firstblood',points,digest)
 
     def attest(self, rnd, role, objective, stage, evidence):
-        if objective not in CHALLENGES or role not in ('red','blue'):
+        if role not in ('red','blue') or not objective:
             raise ValueError('Unknown role or objective')
         points = {'identify': 1} if role=='red' else {'identify':1,'block':2,'remediate':3}
         if stage not in points:
@@ -113,10 +122,11 @@ class Ledger:
     def report(self, rnd):
         if not self.db.execute('SELECT 1 FROM rounds WHERE id=?',(rnd,)).fetchone():
             raise ValueError('Unknown round')
+        # classic score = everything that isn't a per-interval (tick:) or bonus event.
         totals = dict(self.db.execute("SELECT role,SUM(points) FROM events WHERE round=? "
-                                      "AND stage NOT LIKE 'tick:%' GROUP BY role",(rnd,)))
+                                      "AND stage NOT LIKE 'tick:%' AND stage NOT LIKE 'bonus:%' GROUP BY role",(rnd,)))
         tick_totals = dict(self.db.execute("SELECT role,SUM(points) FROM events WHERE round=? "
-                                           "AND stage LIKE 'tick:%' GROUP BY role",(rnd,)))
+                                           "AND (stage LIKE 'tick:%' OR stage LIKE 'bonus:%') GROUP BY role",(rnd,)))
         ticks = self.db.execute('SELECT COUNT(DISTINCT tick) FROM tickflags WHERE round=?',(rnd,)).fetchone()[0]
         count, good = self.db.execute('SELECT COUNT(*),SUM(healthy) FROM health WHERE round=?',(rnd,)).fetchone()
         availability = good/count if count else None
