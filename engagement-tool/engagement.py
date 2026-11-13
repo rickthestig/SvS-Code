@@ -407,6 +407,21 @@ def cmd_collect(args) -> None:
     _snapshot_and_finish(dest, round_name, state, submitted)
 
 
+def _correct_tick_maxima(report_json: str, cohort: str) -> dict:
+    """Replace the ledger's legacy tick maxima with the cohort's own, and add tick percentages.
+    The ledger can't know per-fixture weights; the fixture set does."""
+    standing = json.loads(report_json)
+    fs = ec.load_fixture_set(cohort)
+    m = fs.tick_maxima(standing.get("ticks", 0))
+    standing.update(m)
+    avail = standing.get("availability")
+    rmax, bmax = m["tick_red_max"], m["tick_blue_max"]
+    standing["tick_red_percent"] = round(100 * standing["tick_red_raw"] / rmax, 4) if rmax else None
+    standing["tick_blue_percent"] = (round(100 * standing["tick_blue_raw"] / bmax * (avail if avail else 1), 4)
+                                     if bmax and avail is not None else None)
+    return standing
+
+
 def _snapshot_and_finish(dest, round_name, state, submitted) -> None:
     """Snapshot the scoring standing + ledger, write round-info, log, and clear state. Shared by the
     legacy (attest) and cohort (timed-scoring) collect paths."""
@@ -414,8 +429,9 @@ def _snapshot_and_finish(dest, round_name, state, submitted) -> None:
     print("-- snapshotting scoring standing + ledger --")
     r = subprocess.run([sys.executable, "scoring.py", "report", round_name],
                         cwd=ec.LAB_KIT_DIR, capture_output=True, text=True)
-    (dest / "scoring-final-standing.json").write_text(r.stdout)
-    print(r.stdout)
+    standing = _correct_tick_maxima(r.stdout, state.get("cohort", "legacy-weak"))
+    (dest / "scoring-final-standing.json").write_text(json.dumps(standing, indent=2))
+    print(json.dumps(standing, indent=2))
     ledger_dest = dest / "scoring-ledger-private"
     ledger_dest.mkdir(exist_ok=True)
     if db_path.is_file():

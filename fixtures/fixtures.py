@@ -76,6 +76,15 @@ class FixtureSet:
     def firstblood_points(self, fid: str) -> int:
         return int(self.by_id(fid).get("points", {}).get("firstblood", 0))
 
+    def tick_maxima(self, n_ticks: int) -> dict:
+        """Correct per-cohort timed-round maxima (the ledger's report only has a legacy estimate).
+        Red: each flag fixture capturable once per interval at its tick weight, plus a one-time
+        first-blood bonus per exploit flag fixture. Blue: each blue-scorable fixture once per interval."""
+        red = n_ticks * sum(self.tick_points(i) for i in self.flag_ids)
+        red += sum(self.firstblood_points(i) for i in self.exploit_ids if i in self.flag_ids)
+        blue = n_ticks * sum(self.tick_points(i) for i in self.blue_ids)
+        return {"tick_red_max": red, "tick_blue_max": blue}
+
     def kinds_for_blue(self) -> dict:
         """{'config': [ids], 'exploit': [ids]} over blue-scorable fixtures only (for scoring_policy)."""
         blue = set(self.blue_ids)

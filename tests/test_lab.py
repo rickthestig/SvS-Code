@@ -124,6 +124,13 @@ class FixtureSetTests(unittest.TestCase):
     def test_metasploitable_file_loads(self):
         ms = self.FixtureSet.load(ROOT / "fixtures" / "metasploitable3-linux.json")
         self.assertEqual(set(ms.families()), {"http", "ftp", "smb", "ssh", "mysql", "irc"})
+
+    def test_tick_maxima_per_cohort(self):
+        ms = self.FixtureSet.load(ROOT / "fixtures" / "metasploitable3-linux.json")
+        # 6 flag fixtures (ssh/http-apache/mysql @2 + ftp/irc/rails @1) = 9/interval; +first-blood 2x3.
+        # 7 blue fixtures (+smb @2) = 11/interval.
+        self.assertEqual(ms.tick_maxima(7), {"tick_red_max": 7 * 9 + 6, "tick_blue_max": 7 * 11})
+        self.assertEqual(ms.tick_maxima(0), {"tick_red_max": 6, "tick_blue_max": 0})
         self.assertEqual(ms.by_id("http-apache")["family"], "http")
 
     def test_validation_rejects_bad_sets(self):
