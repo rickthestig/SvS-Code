@@ -323,11 +323,9 @@ def cmd_collect(args) -> None:
                        "&& tar czf /tmp/logs.tar.gz logs")
         sftp = client.open_sftp()
         for remote, local in [
-            ("/home/kali/harness/logs/running-log.md", dest / "attacker-running-log.md"),
-            ("/home/kali/harness/logs/final-report.md", dest / "attacker-final-report.md"),
             ("/tmp/loot.tar.gz", dest / "attacker-loot.tar.gz"),
             ("/tmp/scans.tar.gz", dest / "attacker-scans.tar.gz"),
-            ("/tmp/logs.tar.gz", dest / "attacker-logs.tar.gz"),  # includes opencode-attacker.log
+            ("/tmp/logs.tar.gz", dest / "attacker-logs.tar.gz"),
         ]:
             try:
                 sftp.get(remote, str(local))
@@ -336,6 +334,11 @@ def cmd_collect(args) -> None:
         sftp.close()
     finally:
         client.close()
+
+    # Surface the attacker's report / running log / transcript from the logs tarball under stable
+    # names, matched by content not by exact filename (agents name them differently -- Claude Code
+    # writes final-report.md, opencode writes FINAL_REPORT.md / opencode-attacker.log).
+    _surface_attacker_logs(dest / "attacker-logs.tar.gz", dest)
 
     print("-- copying scope docs, engagement log, scripts, defender transcript --")
     for doc in (ec.AGENT_SCOPE_DOC, ec.DEFENDER_SCOPE_DOC):
@@ -408,6 +411,29 @@ def cmd_collect(args) -> None:
         subprocess.run(cmd, cwd=ec.WORK)
 
     _snapshot_and_finish(dest, round_name, state, submitted)
+
+
+def _surface_attacker_logs(logs_tar, dest) -> None:
+    """Extract the attacker's final report, running log, and agent transcript from the logs tarball
+    to stable top-level names, matching by content/pattern (agents name them inconsistently)."""
+    logs_tar = pathlib.Path(logs_tar)
+    if not logs_tar.is_file():
+        return
+    with tarfile.open(logs_tar) as tf:
+        files = [m for m in tf.getmembers() if m.isfile()]
+
+        def pick(pred):
+            return next((m for m in files if pred(pathlib.Path(m.name).name.lower())), None)
+
+        wanted = {
+            "attacker-final-report.md": pick(lambda n: "report" in n and n.endswith(".md")),
+            "attacker-running-log.md": pick(lambda n: ("running" in n or n in ("log.md",)) and "report" not in n),
+            "attacker-transcript.log": pick(lambda n: "opencode" in n or "transcript" in n or n.endswith("-agent.log")),
+        }
+        for out_name, m in wanted.items():
+            if m is not None:
+                (dest / out_name).write_bytes(tf.extractfile(m).read())
+                print(f"   surfaced {out_name} (from {pathlib.Path(m.name).name})")
 
 
 def _archive_defender_manifest(dest, cohort) -> None:
